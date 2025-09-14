@@ -1,0 +1,58 @@
+## MOSEK'S BASED ON KUHN 
+
+
+init: creates instance(N_simulations,rRange)
+
+
+analytic_out_perf(x_dec,testSampleSet): calculate Joos of decision on sampleSet
+
+
+solve(radius): solves model with radius, get x_dec. Runs analytic_out_perf(). returns (x_dec, Joos, rel:=(Joos<=Jis)) point
+
+
+iter_radius_on_solve(rRange): for r in rRange yield solve(r)
+
+
+simulate(trainData): sets the model's trainData and iterates over iter_radius(), returns x_dec, Joos, rel vectors
+
+
+iter_data_on_simulate(trainDataSets): for dataset in trainDataSet yield simulate(dataset)
+
+run_sim(trainDataSets): call iter_data(trainDataSets), get x_dec_mean, Joos_avg, Joos_q20, Joos_q80, rel_mean
+
+
+##########
+run as:
+
+trainDataSets is (N_experiments x N_historypoints x N_assets)
+
+sim=Class(N_simulations,rRange)
+sim.run_sim(train)
+############
+
+
+
+## MY INTERPRETATION, GENERIC FOR (D,S,R,DR)
+# init: creates instance
+
+# TestOnce_aka_OOSPerf_i(x_dec, testSample): Get Joos_i of decision x_dec on a  point
+
+# TestPerformance_aka_OOSPerf(x_dec, testSampleSet): iterate over OOSPerf_i(), get AVERAGE Joos of decision x_dec on a TestSampleSet
+
+# Solve_aka_GetDecision(params,trainSampleSet): solves model with params, using trainSampleSet (calling D,S,R,DR_subsolve() maybe, some uses one trainSample, some the whole Set, etc), get x_dec, Jis
+
+# SolveTest_aka_GetDecisionAndTestIt(params,trainSampleSet,testSampleSet): Call GetDec(params,trainSampleSet) get x_dec, Jis. Runs OOSPerf(x_dec, testSampleSet). Returns (x_dec, Jis, Joos, rel:=(Joos<=Jis)) point [corresponding to given trainSampleSet]
+
+
+#ITS JUST A GENERATOR TO BE USED BY SIMULATE
+iter_params_on_solvetest(paramRange,trainDataSet,testSampleSet): for par in paramRange: yield GetDecisionAndTestIt(par,trainDataSet,testSampleSet) 
+
+Simulate_aka_SolveTest_over_ParamRange(param_Range,trainDataSet,testSampleSet): sets model trainDataSet, iterates over param_Range using iter_params(paramRange,trainDataSet,testSampleSet). returns x_dec, Jis, Joos, rel vectors
+
+
+#ITS JUST A GENERATOR TO BE USED BY RUN_SIM
+iter_data_on_SolveTest_paramRange(trainDataSets): for dataset in trainDataSet simulate(dataset)
+
+RunSimulations_aka_solvetest_paramrange_over_traindatasets(trainDataSets): call iter_data(trainDataSets), get x_dec_mean, Joos_avg, Joos_q20, Joos_q80, rel_mean
+
+

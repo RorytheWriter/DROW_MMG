@@ -1,0 +1,11 @@
+\ Model LPAC_3bus_fix_signs_copy
+\ LP format - for model browsing. Use MPS format to capture full model detail.
+Minimize
+ 
+Subject To
+ balP_3: 2 Pg[3] - Pij[3,2] - Pij[3,1] = 0.1
+Bounds
+ -infinity <= Pg[3] <= 0
+ Pij[3,2] >= -0.04
+ Pij[3,1] >= -0.04
+End

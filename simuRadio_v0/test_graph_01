@@ -1,0 +1,34 @@
+import numpy as np 
+from sklearn.model_selection import train_test_split
+from numpy import mean
+import statistics
+import matplotlib.pyplot as plt
+from matplotlib import pyplot
+from pylab import *  
+from rsome import dro
+import rsome as rso
+from rsome import E
+
+from biblioteca import *
+
+ep_01 = np.loadtxt('ep_01.txt')
+ep_02 = np.loadtxt('ep_02.txt')
+ep_03 = np.loadtxt('ep_03.txt')
+ep_04 = np.loadtxt('ep_04.txt')
+
+c_01 = np.loadtxt('c_01.txt')
+c_02 = np.loadtxt('c_02.txt')
+c_03 = np.loadtxt('c_03.txt')
+c_04 = np.loadtxt('c_04.txt')
+
+fig, axes = plt.subplots()
+axes.set_xlabel("Wasserstein radio")
+axes.set_ylabel("reliability")
+axes.plot(ep_01,c_01, color="black",linestyle="dashed",label='dev_0.5')
+axes.plot(ep_02,c_02, color="black", label='dev_1.0')
+axes.plot(ep_03,c_03, color="grey",linestyle="dashed",label='dev_1.5')
+axes.plot(ep_04,c_04, color="grey",label='dev_2.0')
+plt.legend()
+plt.show()
+
+

@@ -1,0 +1,48 @@
+import numpy as np 
+from sklearn.model_selection import train_test_split
+from numpy import mean
+import statistics
+import matplotlib.pyplot as plt
+from matplotlib import pyplot
+from pylab import *  
+from rsome import dro
+import rsome as rso
+from rsome import E
+
+from biblioteca import *
+#---------- The "empirical dataset"----------------------------------------------------
+n = 100 # number of records in the historical data
+np.random.seed(1) # semilla
+mu_03, sigma_03 = 9, 1.5 # media y desvio estandar
+zhat_03 = np.random.normal(mu_03, sigma_03, n) # The empirical dataset
+#-------------------------------------------------------------------------------------
+K = 200   # iteraciones para el cálculo de la confianza de epsilon
+T = 200 # número de valores del radio epsilon a evaluar
+stp = 0.0075 # incrementos del radio epsilon.... T * stp = 1.5 aprox !!!!
+#-----------------------------------------------
+epsilon = 0; c_03=[]; ep_03=[]; ug=[]; lg=[]; vg=[]
+for e in range(T):
+   cont, u, l, v, um, vm, lm = 0, 0, 0, 0, 0, 0, 0  
+   for i in range(K): 
+        train, test = train_test_split(zhat_03 , test_size = 0.50, shuffle = True) # datos de entrenamiento y validación
+        u = (superior(train, epsilon)); 
+        l = (inferior(train, epsilon)); 
+        v = (validacion(test));
+        print(f"t: {e} and k: {i}")
+        if (v > l and v < u):
+           cont = cont + 1  
+   c_03.append(cont/K)
+   ep_03.append(epsilon)
+   epsilon = epsilon + stp # <<<<<<<-------- incremento del radio
+#------------------------------------------------------
+# graph
+fig, axes = plt.subplots()
+axes.set_xlabel("Wasserstein radio")
+axes.set_ylabel("reliability")
+axes.plot(ep_03,c_03, color="black")
+plt.show()
+#----- Salvando datos en archivos txt -----------
+np.savetxt('ep_03.txt', ep_03)
+np.savetxt('c_03.txt', c_03)
+# ----------------------------------------------
+

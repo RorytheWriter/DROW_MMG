@@ -1,0 +1,15 @@
+PeriodEnd, PeriodStart, AirTemp, Azimuth, CloudOpacity, DewpointTemp, Dhi, Dni, Ebh, Ghi, GtiFixedTilt, GtiTracking, PrecipitableWater, RelativeHumidity, SnowWater, SurfacePressure, WindDirection10m, WindSpeed10m, Zenith, AlbedoDaily
+2015-01-01T12:00:00Z, 2015-01-01T11:45:00Z, 11.3, -115, 3.1, 10.2, 50, 542, 99, 149, 175, 258, 9.4, 93.2, 0.0, 729.6, 143, 1.6, 80, 0.15
+2015-01-01T17:00:00Z, 2015-01-01T16:45:00Z, 19.1, -178, 0.0, 6.3, 87, 1035, 907, 993, 1042, 994, 9.0, 43.4, 0.0, 729.2, 143, 1.5, 29, 0.15
+2015-03-20T12:15:00Z, 2015-03-20T12:00:00Z, 11.4, -92, 53.9, 11.2, 102, 0, 0, 102, 102, 102, 18.3, 98.9, 0.0, 730.7, 172, 0.5, 74, 0.14
+
+SOLCAST LEGEND
+
+GHI - Global Horizontal Irradiance (direct and diffuse obtained on a horizontal surface)
+GTI - Global Tilted Irradiance fixed tilt
+GTI - Global Tilted Irradiance tracking
+(direct and diffuse obtained on inclined surface)
+
+DHI - Diffuse Horizontal Irradiance (only diffuse/scattering, not beam)
+DNI - Direct Normal Irradiance (only direct normal, not diffuse)
+EBH - horizontal component of beam radiation

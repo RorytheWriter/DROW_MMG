@@ -1,0 +1,553 @@
+(* Content-type: application/vnd.wolfram.mathematica *)
+
+(*** Wolfram Notebook File ***)
+(* http://www.wolfram.com/nb *)
+
+(* CreatedBy='Mathematica 14.0' *)
+
+(*CacheID: 234*)
+(* Internal cache information:
+NotebookFileLineBreakTest
+NotebookFileLineBreakTest
+NotebookDataPosition[       158,          7]
+NotebookDataLength[     21610,        545]
+NotebookOptionsPosition[     20231,        513]
+NotebookOutlinePosition[     20671,        530]
+CellTagsIndexPosition[     20628,        527]
+WindowFrame->Normal*)
+
+(* Beginning of Notebook Content *)
+Notebook[{
+Cell[BoxData[
+ RowBox[{"ConvexOptimization", "[", "]"}]], "Input",
+ CellChangeTimes->{{3.9306629553889313`*^9, 
+  3.930662962167303*^9}},ExpressionUUID->"acfba06a-e64e-2144-9881-\
+4cd975d746fc"],
+
+Cell[CellGroupData[{
+
+Cell[BoxData[
+ RowBox[{"Reduce", "[", 
+  RowBox[{
+   RowBox[{
+    RowBox[{
+     RowBox[{
+      RowBox[{
+       RowBox[{"n3", "/", "2"}], "*", 
+       RowBox[{"Sin", "[", 
+        RowBox[{"2", "*", "x"}], "]"}]}], "+", 
+      RowBox[{"Efd", "*", 
+       RowBox[{"Sin", "[", "x", "]"}]}], "-", "alpha"}], "==", "0"}], "&&", 
+    RowBox[{"0", "<", "x", "<", "Pi"}]}], ",", "x"}], "]"}]], "Input",
+ CellChangeTimes->{{3.9352594550667114`*^9, 3.9352594592530956`*^9}, {
+  3.935259509574753*^9, 3.935259590169319*^9}, {3.935259656114294*^9, 
+  3.935259724803959*^9}, {3.935259761613884*^9, 3.9352597650294323`*^9}},
+ CellLabel->"In[1]:=",ExpressionUUID->"629e487c-da66-ca48-af74-e132cca34355"],
+
+Cell[BoxData["$Aborted"], "Output",
+ CellChangeTimes->{3.935259595355461*^9, 3.935259684003708*^9, 
+  3.9352597312565403`*^9, 3.9352600615721493`*^9},
+ CellLabel->"Out[4]=",ExpressionUUID->"41753136-9ba7-e546-9d7b-0bb938fd78f5"]
+}, Open  ]],
+
+Cell[CellGroupData[{
+
+Cell[BoxData[
+ RowBox[{"Reduce", "[", 
+  RowBox[{
+   RowBox[{
+    RowBox[{
+     RowBox[{"a", "*", 
+      RowBox[{"Sin", "[", 
+       RowBox[{"2", "*", "x"}], "]"}]}], "+", 
+     RowBox[{"b", "*", 
+      RowBox[{"Sin", "[", "x", "]"}]}], "-", "c"}], "==", "0"}], "&&", 
+   RowBox[{"0", "<", "x", "<", "Pi"}], "&&", 
+   RowBox[{"b", ">", "c"}], "&&", 
+   RowBox[{"c", ">", "a"}], "&&", 
+   RowBox[{"a", ">", "0"}]}], "]"}]], "Input",
+ CellChangeTimes->{{3.9352600747132893`*^9, 3.9352600764675255`*^9}, {
+  3.9352629165590878`*^9, 3.9352629279804745`*^9}, {3.9352630175863495`*^9, 
+  3.9352630259242744`*^9}, {3.935266148263666*^9, 3.935266153843851*^9}, {
+  3.935266337190462*^9, 3.935266337440748*^9}},
+ CellLabel->"In[3]:=",ExpressionUUID->"b4158589-d5c4-ae45-ab1a-4764e809a6d3"],
+
+Cell[BoxData[
+ TemplateBox[{
+  "Reduce", "ztest", 
+   "\"Unable to decide whether numeric quantities \\!\\(\\*RowBox[{\\\"{\\\", \
+RowBox[{RowBox[{\\\"\[Pi]\\\", \\\"+\\\", RowBox[{\\\"8\\\", \\\" \\\", \
+RowBox[{\\\"ArcTan\\\", \\\"[\\\", RowBox[{\\\"1\\\", \\\"-\\\", \
+SqrtBox[\\\"2\\\"]}], \\\"]\\\"}]}]}], \\\",\\\", RowBox[{\\\"\[Pi]\\\", \
+\\\"-\\\", RowBox[{\\\"16\\\", \\\" \\\", RowBox[{\\\"ArcTan\\\", \\\"[\\\", \
+RowBox[{\\\"Root\\\", \\\"[\\\", RowBox[{RowBox[{RowBox[{\\\"1\\\", \
+\\\"+\\\", RowBox[{\\\"Times\\\", \\\"[\\\", RowBox[{\\\"\[LeftSkeleton]\\\", \
+\\\"2\\\", \\\"\[RightSkeleton]\\\"}], \\\"]\\\"}], \\\"+\\\", \
+RowBox[{\\\"Times\\\", \\\"[\\\", RowBox[{\\\"\[LeftSkeleton]\\\", \\\"2\\\", \
+\\\"\[RightSkeleton]\\\"}], \\\"]\\\"}], \\\"+\\\", RowBox[{\\\"Times\\\", \\\
+\"[\\\", RowBox[{\\\"\[LeftSkeleton]\\\", \\\"2\\\", \
+\\\"\[RightSkeleton]\\\"}], \\\"]\\\"}], \\\"+\\\", RowBox[{\\\"Power\\\", \\\
+\"[\\\", RowBox[{\\\"\[LeftSkeleton]\\\", \\\"2\\\", \
+\\\"\[RightSkeleton]\\\"}], \\\"]\\\"}]}], \\\"&\\\"}], \\\",\\\", \\\"3\\\", \
+\\\",\\\", \\\"0\\\"}], \\\"]\\\"}], \\\"]\\\"}]}]}], \\\",\\\", \
+RowBox[{\\\"4\\\", \\\" \\\", RowBox[{\\\"(\\\", RowBox[{RowBox[{\\\"ArcTan\\\
+\", \\\"[\\\", RowBox[{\\\"1\\\", \\\"-\\\", SqrtBox[\\\"2\\\"]}], \
+\\\"]\\\"}], \\\"+\\\", RowBox[{\\\"3\\\", \\\" \\\", RowBox[{\\\"ArcTan\\\", \
+\\\"[\\\", RowBox[{\\\"Root\\\", \\\"[\\\", \
+RowBox[{RowBox[{RowBox[{\\\"Plus\\\", \\\"[\\\", \
+RowBox[{\\\"\[LeftSkeleton]\\\", \\\"5\\\", \\\"\[RightSkeleton]\\\"}], \\\"]\
+\\\"}], \\\"&\\\"}], \\\",\\\", \\\"3\\\", \\\",\\\", \\\"0\\\"}], \
+\\\"]\\\"}], \\\"]\\\"}]}]}], \\\")\\\"}]}], \\\",\\\", RowBox[{RowBox[{\\\"-\
+\\\", \\\"4\\\"}], \\\" \\\", RowBox[{\\\"(\\\", RowBox[{\\\"\[Pi]\\\", \\\"-\
+\\\", RowBox[{\\\"ArcTan\\\", \\\"[\\\", RowBox[{\\\"1\\\", \\\"+\\\", \
+SqrtBox[\\\"2\\\"]}], \\\"]\\\"}], \\\"-\\\", RowBox[{\\\"3\\\", \\\" \\\", \
+RowBox[{\\\"ArcTan\\\", \\\"[\\\", RowBox[{\\\"Root\\\", \\\"[\\\", \
+RowBox[{RowBox[{RowBox[{\\\"Plus\\\", \\\"[\\\", \
+RowBox[{\\\"\[LeftSkeleton]\\\", \\\"5\\\", \\\"\[RightSkeleton]\\\"}], \\\"]\
+\\\"}], \\\"&\\\"}], \\\",\\\", \\\"4\\\", \\\",\\\", \\\"0\\\"}], \
+\\\"]\\\"}], \\\"]\\\"}]}]}], \\\")\\\"}]}], \\\",\\\", RowBox[{\\\"2\\\", \\\
+\" \\\", RowBox[{\\\"(\\\", RowBox[{RowBox[{\\\"ArcTan\\\", \\\"[\\\", \
+RowBox[{\\\"Root\\\", \\\"[\\\", RowBox[{RowBox[{RowBox[{RowBox[{\\\"-\\\", \
+\\\"1\\\"}], \\\"+\\\", RowBox[{\\\"Times\\\", \\\"[\\\", RowBox[{\\\"\
+\[LeftSkeleton]\\\", \\\"2\\\", \\\"\[RightSkeleton]\\\"}], \\\"]\\\"}], \
+\\\"+\\\", RowBox[{\\\"Times\\\", \\\"[\\\", RowBox[{\\\"\[LeftSkeleton]\\\", \
+\\\"2\\\", \\\"\[RightSkeleton]\\\"}], \\\"]\\\"}], \\\"+\\\", \
+RowBox[{\\\"Power\\\", \\\"[\\\", RowBox[{\\\"\[LeftSkeleton]\\\", \\\"2\\\", \
+\\\"\[RightSkeleton]\\\"}], \\\"]\\\"}]}], \\\"&\\\"}], \\\",\\\", \\\"1\\\", \
+\\\",\\\", \\\"0\\\"}], \\\"]\\\"}], \\\"]\\\"}], \\\"-\\\", \
+RowBox[{\\\"2\\\", \\\" \\\", RowBox[{\\\"ArcTan\\\", \\\"[\\\", \
+RowBox[{\\\"Root\\\", \\\"[\\\", RowBox[{RowBox[{RowBox[{\\\"Plus\\\", \
+\\\"[\\\", RowBox[{\\\"\[LeftSkeleton]\\\", \\\"7\\\", \\\"\[RightSkeleton]\\\
+\"}], \\\"]\\\"}], \\\"&\\\"}], \\\",\\\", \\\"2\\\", \\\",\\\", \\\"0\\\"}], \
+\\\"]\\\"}], \\\"]\\\"}]}]}], \\\")\\\"}]}]}], \\\"}\\\"}]\\) are equal to \
+zero. Assuming they are.\"", 2, 3, 2, 19037755399406785381, "Local"},
+  "MessageTemplate"]], "Message", "MSG",
+ CellChangeTimes->{3.9352663535500984`*^9},
+ CellLabel->
+  "During evaluation of \
+In[3]:=",ExpressionUUID->"308480aa-cf5e-7747-831d-3c7f101f420e"],
+
+Cell[BoxData[
+ RowBox[{
+  RowBox[{"a", ">", "0"}], "&&", 
+  RowBox[{"(", 
+   RowBox[{
+    RowBox[{"(", 
+     RowBox[{
+      RowBox[{"0", "<", "x", "<", 
+       RowBox[{"2", " ", 
+        RowBox[{"ArcTan", "[", 
+         InterpretationBox[
+          TemplateBox[{"Root", 
+            InterpretationBox[
+             StyleBox[
+              TemplateBox[{"\"0.180\"", 
+                DynamicBox[
+                 FEPrivate`FrontEndResource[
+                 "FEExpressions", "NumericalApproximationElider"]]}, 
+               "RowDefault"], ShowStringCharacters -> False], 
+             0.17950902460291676132619897998665692285`15.954589770191003, 
+             Editable -> False], 
+            TagBox[
+             RowBox[{"Root", "[", 
+               RowBox[{
+                 RowBox[{
+                   RowBox[{
+                    RowBox[{"-", "1"}], "+", 
+                    RowBox[{"5", " ", "#1"}], "+", 
+                    RowBox[{"3", " ", 
+                    SuperscriptBox["#1", "2"]}], "+", 
+                    SuperscriptBox["#1", "3"]}], "&"}], ",", "1"}], "]"}], 
+             Short[#, 7]& ], 0.17950902460291676`},
+           "NumericalApproximation"],
+          Root[-1 + 5 # + 3 #^2 + #^3& , 1, 0]], "]"}]}]}], "&&", 
+      RowBox[{"b", ">", 
+       RowBox[{
+        RowBox[{"Csc", "[", "x", "]"}], " ", 
+        RowBox[{"(", 
+         RowBox[{"a", "-", 
+          RowBox[{"a", " ", 
+           RowBox[{"Sin", "[", 
+            RowBox[{"2", " ", "x"}], "]"}]}]}], ")"}]}]}]}], ")"}], "||", 
+    RowBox[{"(", 
+     RowBox[{
+      RowBox[{
+       RowBox[{"2", " ", 
+        RowBox[{"ArcTan", "[", 
+         InterpretationBox[
+          TemplateBox[{"Root", 
+            InterpretationBox[
+             StyleBox[
+              TemplateBox[{"\"0.180\"", 
+                DynamicBox[
+                 FEPrivate`FrontEndResource[
+                 "FEExpressions", "NumericalApproximationElider"]]}, 
+               "RowDefault"], ShowStringCharacters -> False], 
+             0.17950902460291676132619897998665692285`15.954589770191003, 
+             Editable -> False], 
+            TagBox[
+             RowBox[{"Root", "[", 
+               RowBox[{
+                 RowBox[{
+                   RowBox[{
+                    RowBox[{"-", "1"}], "+", 
+                    RowBox[{"5", " ", "#1"}], "+", 
+                    RowBox[{"3", " ", 
+                    SuperscriptBox["#1", "2"]}], "+", 
+                    SuperscriptBox["#1", "3"]}], "&"}], ",", "1"}], "]"}], 
+             Short[#, 7]& ], 0.17950902460291676`},
+           "NumericalApproximation"],
+          Root[-1 + 5 # + 3 #^2 + #^3& , 1, 0]], "]"}]}], "\[LessEqual]", "x",
+        "<", 
+       FractionBox["\[Pi]", "2"]}], "&&", 
+      RowBox[{"b", ">", 
+       FractionBox[
+        RowBox[{
+         RowBox[{"a", " ", 
+          RowBox[{"Cos", "[", 
+           FractionBox["x", "2"], "]"}]}], "-", 
+         RowBox[{"a", " ", 
+          RowBox[{"Cos", "[", 
+           FractionBox[
+            RowBox[{"3", " ", "x"}], "2"], "]"}]}], "+", 
+         RowBox[{"a", " ", 
+          RowBox[{"Sin", "[", 
+           FractionBox["x", "2"], "]"}]}], "+", 
+         RowBox[{"a", " ", 
+          RowBox[{"Sin", "[", 
+           FractionBox[
+            RowBox[{"3", " ", "x"}], "2"], "]"}]}]}], 
+        RowBox[{
+         RowBox[{"Cos", "[", 
+          FractionBox["x", "2"], "]"}], "-", 
+         RowBox[{"Sin", "[", 
+          FractionBox["x", "2"], "]"}]}]]}]}], ")"}], "||", 
+    RowBox[{"(", 
+     RowBox[{
+      RowBox[{
+       FractionBox["\[Pi]", "2"], "<", "x", "<", "\[Pi]"}], "&&", 
+      RowBox[{"b", ">", 
+       RowBox[{
+        RowBox[{"Csc", "[", "x", "]"}], " ", 
+        RowBox[{"(", 
+         RowBox[{"a", "-", 
+          RowBox[{"a", " ", 
+           RowBox[{"Sin", "[", 
+            RowBox[{"2", " ", "x"}], "]"}]}]}], ")"}]}]}]}], ")"}]}], ")"}], "&&", 
+  RowBox[{"c", "\[Equal]", 
+   RowBox[{
+    RowBox[{"b", " ", 
+     RowBox[{"Sin", "[", "x", "]"}]}], "+", 
+    RowBox[{"a", " ", 
+     RowBox[{"Sin", "[", 
+      RowBox[{"2", " ", "x"}], "]"}]}]}]}]}]], "Output",
+ CellChangeTimes->{3.9352600781537457`*^9, 3.9352630381628056`*^9, 
+  3.9352661642424088`*^9, 3.935266353607712*^9},
+ CellLabel->"Out[3]=",ExpressionUUID->"42dcbf35-f41b-2743-ac78-bb55d0ee0ca5"]
+}, Open  ]],
+
+Cell[CellGroupData[{
+
+Cell[BoxData[
+ RowBox[{"Assuming", "[", 
+  RowBox[{
+   RowBox[{
+    RowBox[{"0", "<", "x", "<", "Pi"}], "&&", 
+    RowBox[{"b", ">", "c"}], "&&", 
+    RowBox[{"c", ">", "a"}], "&&", 
+    RowBox[{"a", ">", "0"}]}], ",", 
+   RowBox[{"FullSimplify", "@", 
+    RowBox[{"Reduce", "[", 
+     RowBox[{
+      RowBox[{
+       RowBox[{"a", "*", 
+        RowBox[{"Sin", "[", 
+         RowBox[{"2", "*", "x"}], "]"}]}], "+", 
+       RowBox[{"b", "*", 
+        RowBox[{"Sin", "[", "x", "]"}]}], "-", "c"}], "==", "0"}], "]"}]}]}], 
+  "]"}]], "Input",
+ CellChangeTimes->{{3.935266317253582*^9, 3.9352663667767715`*^9}},
+ CellLabel->"In[4]:=",ExpressionUUID->"a9509490-e6ca-cc4a-95c4-e4eb7765663f"],
+
+Cell[BoxData[
+ RowBox[{
+  RowBox[{"(", 
+   RowBox[{
+    RowBox[{"a", "\[Equal]", 
+     RowBox[{
+      RowBox[{"Csc", "[", 
+       RowBox[{"2", " ", "x"}], "]"}], " ", 
+      RowBox[{"(", 
+       RowBox[{"c", "-", 
+        RowBox[{"b", " ", 
+         RowBox[{"Sin", "[", "x", "]"}]}]}], ")"}]}]}], "&&", 
+    RowBox[{
+     RowBox[{"Sin", "[", 
+      RowBox[{"2", " ", "x"}], "]"}], "\[NotEqual]", "0"}]}], ")"}], "||", 
+  RowBox[{"(", 
+   RowBox[{
+    RowBox[{"b", "\[Equal]", 
+     RowBox[{"c", " ", 
+      RowBox[{"Csc", "[", "x", "]"}]}]}], "&&", 
+    RowBox[{
+     RowBox[{"Sin", "[", 
+      RowBox[{"2", " ", "x"}], "]"}], "\[Equal]", "0"}]}], ")"}]}]], "Output",
+ CellChangeTimes->{3.935266369578535*^9},
+ CellLabel->"Out[4]=",ExpressionUUID->"418f32e1-504c-a84b-8085-7fa4fe78f140"]
+}, Open  ]],
+
+Cell[CellGroupData[{
+
+Cell[BoxData[
+ RowBox[{"Solve", "[", 
+  RowBox[{
+   RowBox[{
+    RowBox[{"(", 
+     RowBox[{
+      RowBox[{"a", "\[Equal]", 
+       RowBox[{
+        RowBox[{"Csc", "[", 
+         RowBox[{"2", " ", "x"}], "]"}], " ", 
+        RowBox[{"(", 
+         RowBox[{"c", "-", 
+          RowBox[{"b", " ", 
+           RowBox[{"Sin", "[", "x", "]"}]}]}], ")"}]}]}], "&&", 
+      RowBox[{
+       RowBox[{"Sin", "[", 
+        RowBox[{"2", " ", "x"}], "]"}], "\[NotEqual]", "0"}]}], ")"}], "&&", 
+    RowBox[{"0", "<", "x", "<", "Pi"}], "&&", 
+    RowBox[{"b", ">", "c"}], "&&", 
+    RowBox[{"c", ">", "a"}], "&&", 
+    RowBox[{"a", ">", "0"}]}], ",", 
+   RowBox[{"{", "x", "}"}], ",", "Reals"}], "]"}]], "Input",
+ CellChangeTimes->{{3.935266547168833*^9, 3.9352666389999237`*^9}},
+ NumberMarks->False,
+ CellLabel->"In[6]:=",ExpressionUUID->"c40e86e3-a729-4f4b-9261-5e513b519360"],
+
+Cell[BoxData[
+ RowBox[{"{", 
+  RowBox[{
+   RowBox[{"{", 
+    RowBox[{"x", "\[Rule]", 
+     TemplateBox[{
+       RowBox[{"2", " ", 
+         RowBox[{"ArcTan", "[", 
+           RowBox[{"Root", "[", 
+             RowBox[{
+               RowBox[{
+                 RowBox[{"c", "+", 
+                   RowBox[{
+                    RowBox[{"(", 
+                    RowBox[{
+                    RowBox[{
+                    RowBox[{"-", "4"}], " ", "a"}], "-", 
+                    RowBox[{"2", " ", "b"}]}], ")"}], " ", "#1"}], "+", 
+                   RowBox[{"2", " ", "c", " ", 
+                    SuperscriptBox["#1", "2"]}], "+", 
+                   RowBox[{
+                    RowBox[{"(", 
+                    RowBox[{
+                    RowBox[{"4", " ", "a"}], "-", 
+                    RowBox[{"2", " ", "b"}]}], ")"}], " ", 
+                    SuperscriptBox["#1", "3"]}], "+", 
+                   RowBox[{"c", " ", 
+                    SuperscriptBox["#1", "4"]}]}], "&"}], ",", "1"}], "]"}], 
+           "]"}]}], 
+       InterpretationBox[
+        DynamicModuleBox[{Typeset`open = False}, 
+         TemplateBox[{"Expression", 
+           StyleBox[
+            TagBox[
+             TooltipBox["\"condition\"", 
+              TagBox[
+               RowBox[{
+                 RowBox[{"(", 
+                   RowBox[{
+                    RowBox[{"a", "<", "b", "<", 
+                    RowBox[{"2", " ", "a"}]}], "&&", 
+                    RowBox[{"a", "<", "c", "<", "b"}], "&&", 
+                    RowBox[{"a", ">", "0"}]}], ")"}], "||", 
+                 RowBox[{"(", 
+                   RowBox[{
+                    RowBox[{"a", "<", "c", "<", "b"}], "&&", 
+                    RowBox[{"a", ">", "0"}], "&&", 
+                    RowBox[{"b", ">", 
+                    RowBox[{"2", " ", "a"}]}]}], ")"}]}], Short[#, 7]& ]], 
+             Annotation[#, 
+              Short[
+               Or[
+                And[
+                 
+                 Inequality[$CellContext`a, Less, $CellContext`b, Less, 
+                  2 $CellContext`a], 
+                 
+                 Inequality[$CellContext`a, Less, $CellContext`c, 
+                  Less, $CellContext`b], $CellContext`a > 0], 
+                And[
+                 
+                 Inequality[$CellContext`a, Less, $CellContext`c, 
+                  Less, $CellContext`b], $CellContext`a > 0, $CellContext`b > 
+                 2 $CellContext`a]], 7], "Tooltip"]& ], "IconizedCustomName", 
+            StripOnInput -> False], 
+           GridBox[{{
+              RowBox[{
+                TagBox["\"Head: \"", "IconizedLabel"], "\[InvisibleSpace]", 
+                TagBox["Or", "IconizedItem"]}]}, {
+              RowBox[{
+                TagBox["\"Byte count: \"", "IconizedLabel"], 
+                "\[InvisibleSpace]", 
+                TagBox["768", "IconizedItem"]}]}}, 
+            GridBoxAlignment -> {"Columns" -> {{Left}}}, DefaultBaseStyle -> 
+            "Column", 
+            GridBoxItemSize -> {
+             "Columns" -> {{Automatic}}, "Rows" -> {{Automatic}}}], 
+           Dynamic[Typeset`open]}, "IconizedObject"]], 
+        Or[
+         And[
+          
+          Inequality[$CellContext`a, Less, $CellContext`b, Less, 
+           2 $CellContext`a], 
+          
+          Inequality[$CellContext`a, Less, $CellContext`c, 
+           Less, $CellContext`b], $CellContext`a > 0], 
+         And[
+          
+          Inequality[$CellContext`a, Less, $CellContext`c, 
+           Less, $CellContext`b], $CellContext`a > 0, $CellContext`b > 
+          2 $CellContext`a]], SelectWithContents -> True, Selectable -> 
+        False]},
+      "ConditionalExpression"]}], "}"}], ",", 
+   RowBox[{"{", 
+    RowBox[{"x", "\[Rule]", 
+     TemplateBox[{
+       RowBox[{"2", " ", 
+         RowBox[{"ArcTan", "[", 
+           RowBox[{"Root", "[", 
+             RowBox[{
+               RowBox[{
+                 RowBox[{"c", "+", 
+                   RowBox[{
+                    RowBox[{"(", 
+                    RowBox[{
+                    RowBox[{
+                    RowBox[{"-", "4"}], " ", "a"}], "-", 
+                    RowBox[{"2", " ", "b"}]}], ")"}], " ", "#1"}], "+", 
+                   RowBox[{"2", " ", "c", " ", 
+                    SuperscriptBox["#1", "2"]}], "+", 
+                   RowBox[{
+                    RowBox[{"(", 
+                    RowBox[{
+                    RowBox[{"4", " ", "a"}], "-", 
+                    RowBox[{"2", " ", "b"}]}], ")"}], " ", 
+                    SuperscriptBox["#1", "3"]}], "+", 
+                   RowBox[{"c", " ", 
+                    SuperscriptBox["#1", "4"]}]}], "&"}], ",", "2"}], "]"}], 
+           "]"}]}], 
+       InterpretationBox[
+        DynamicModuleBox[{Typeset`open = False}, 
+         TemplateBox[{"Expression", 
+           StyleBox[
+            TagBox[
+             TooltipBox["\"condition\"", 
+              TagBox[
+               RowBox[{
+                 RowBox[{"(", 
+                   RowBox[{
+                    RowBox[{"a", "<", "b", "<", 
+                    RowBox[{"2", " ", "a"}]}], "&&", 
+                    RowBox[{"a", "<", "c", "<", "b"}], "&&", 
+                    RowBox[{"a", ">", "0"}]}], ")"}], "||", 
+                 RowBox[{"(", 
+                   RowBox[{
+                    RowBox[{"a", "<", "c", "<", "b"}], "&&", 
+                    RowBox[{"a", ">", "0"}], "&&", 
+                    RowBox[{"b", ">", 
+                    RowBox[{"2", " ", "a"}]}]}], ")"}]}], Short[#, 7]& ]], 
+             Annotation[#, 
+              Short[
+               Or[
+                And[
+                 
+                 Inequality[$CellContext`a, Less, $CellContext`b, Less, 
+                  2 $CellContext`a], 
+                 
+                 Inequality[$CellContext`a, Less, $CellContext`c, 
+                  Less, $CellContext`b], $CellContext`a > 0], 
+                And[
+                 
+                 Inequality[$CellContext`a, Less, $CellContext`c, 
+                  Less, $CellContext`b], $CellContext`a > 0, $CellContext`b > 
+                 2 $CellContext`a]], 7], "Tooltip"]& ], "IconizedCustomName", 
+            StripOnInput -> False], 
+           GridBox[{{
+              RowBox[{
+                TagBox["\"Head: \"", "IconizedLabel"], "\[InvisibleSpace]", 
+                TagBox["Or", "IconizedItem"]}]}, {
+              RowBox[{
+                TagBox["\"Byte count: \"", "IconizedLabel"], 
+                "\[InvisibleSpace]", 
+                TagBox["768", "IconizedItem"]}]}}, 
+            GridBoxAlignment -> {"Columns" -> {{Left}}}, DefaultBaseStyle -> 
+            "Column", 
+            GridBoxItemSize -> {
+             "Columns" -> {{Automatic}}, "Rows" -> {{Automatic}}}], 
+           Dynamic[Typeset`open]}, "IconizedObject"]], 
+        Or[
+         And[
+          
+          Inequality[$CellContext`a, Less, $CellContext`b, Less, 
+           2 $CellContext`a], 
+          
+          Inequality[$CellContext`a, Less, $CellContext`c, 
+           Less, $CellContext`b], $CellContext`a > 0], 
+         And[
+          
+          Inequality[$CellContext`a, Less, $CellContext`c, 
+           Less, $CellContext`b], $CellContext`a > 0, $CellContext`b > 
+          2 $CellContext`a]], SelectWithContents -> True, Selectable -> 
+        False]},
+      "ConditionalExpression"]}], "}"}]}], "}"}]], "Output",
+ CellChangeTimes->{3.935266402112692*^9, 3.935266648002054*^9},
+ CellLabel->"Out[6]=",ExpressionUUID->"ebd87307-9c55-b640-8200-9a7cf489c116"]
+}, Open  ]]
+},
+WindowSize->{1152, 579.6},
+WindowMargins->{{
+  Automatic, -5.399999999999864}, {-5.399999999999977, Automatic}},
+FrontEndVersion->"14.0 for Microsoft Windows (64-bit) (December 12, 2023)",
+StyleDefinitions->"Default.nb",
+ExpressionUUID->"135726aa-9586-624a-b534-4a766041556f"
+]
+(* End of Notebook Content *)
+
+(* Internal cache information *)
+(*CellTagsOutline
+CellTagsIndex->{}
+*)
+(*CellTagsIndex
+CellTagsIndex->{}
+*)
+(*NotebookFileOutline
+Notebook[{
+Cell[558, 20, 194, 4, 28, "Input",ExpressionUUID->"acfba06a-e64e-2144-9881-4cd975d746fc"],
+Cell[CellGroupData[{
+Cell[777, 28, 687, 16, 28, "Input",ExpressionUUID->"629e487c-da66-ca48-af74-e132cca34355"],
+Cell[1467, 46, 228, 3, 32, "Output",ExpressionUUID->"41753136-9ba7-e546-9d7b-0bb938fd78f5"]
+}, Open  ]],
+Cell[CellGroupData[{
+Cell[1732, 54, 780, 18, 28, "Input",ExpressionUUID->"b4158589-d5c4-ae45-ab1a-4764e809a6d3"],
+Cell[2515, 74, 3566, 53, 72, "Message",ExpressionUUID->"308480aa-cf5e-7747-831d-3c7f101f420e"],
+Cell[6084, 129, 4259, 116, 119, "Output",ExpressionUUID->"42dcbf35-f41b-2743-ac78-bb55d0ee0ca5"]
+}, Open  ]],
+Cell[CellGroupData[{
+Cell[10380, 250, 683, 19, 28, "Input",ExpressionUUID->"a9509490-e6ca-cc4a-95c4-e4eb7765663f"],
+Cell[11066, 271, 787, 24, 32, "Output",ExpressionUUID->"418f32e1-504c-a84b-8085-7fa4fe78f140"]
+}, Open  ]],
+Cell[CellGroupData[{
+Cell[11890, 300, 865, 24, 28, "Input",ExpressionUUID->"c40e86e3-a729-4f4b-9261-5e513b519360"],
+Cell[12758, 326, 7457, 184, 139, "Output",ExpressionUUID->"ebd87307-9c55-b640-8200-9a7cf489c116"]
+}, Open  ]]
+}
+]
+*)
+
