@@ -1,0 +1,30 @@
+=====CURRENTLY=====
+class generic:
+	solve() undefined
+	resolve() undefined
+	solveTest(): if solved, and given is same size||nosample yet(det-nom) resolve(), else createmodel()+solve(); then Joos() tests decision
+
+
+class EDnR:
+	createmodel()
+	GetXiFromSampSet(): convert sample scenario to xiset
+	createXiVar(XiSet): create xivar and xivar==xiSet ctrt
+ 	updateXiVar(XiSet): if given is same size as current, update RHS 
+	updNom2SampMean(): Set Nominal RnwGen&Dem to GetExpectedFromSampSet()[just an avg], to shift towards E[nom]=0
+	heurRes()
+			
+
+
+class xEDnR:
+	solve(): updNom2SampMean(), heurRes() sets R(bounds), GetXiFromSampSet()->solve_int(), returns xd,Jis
+
+	solve_int(): internal magic per model, if nondet calls createxiVar()
+
+	resolve(): If given, actualiza trainsampleset [updNom2SampMean(), update Pmax/LoadBal ctrts. if nondet GetXiFromSampSet()->updateXiVar(), update support]
+        	If given, actualiza ADMM vars and ctrts
+	        Then, does M.optimize(), gets result
+
+
+=====GOAL=====
+* Make a solvetest in EDnR that overwrites solvetest(). *CHECK*
+* Subir resolve() a EDnR. Considerar si es det/nondet. Si es SO, Q=100 i guess. REVISA SI HAY DIFERENCIAS EN EL RESOLVE DE SO/RO/DROW, creeria que no *CHECK*
