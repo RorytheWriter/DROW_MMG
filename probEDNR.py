@@ -1,9 +1,11 @@
+from enum import Enum
 import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
 import matplotlib as mpl
 import matplotlib.pyplot as plt  
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from copy import deepcopy
 import types
 from IPython.display import clear_output
@@ -26,17 +28,17 @@ if (__name__=="__main__"):
     print("Hello world!")
 
 @contextmanager
-def timed(show=True): # with timed(): ...
+def timed(title:str,logger:logging.Logger,show=True): # with timed(): ...
     start_time = time.time()
     yield # returns a generator!
     end_time = time.time()
     diff=end_time-start_time
     if show:
-        print(f'Duration: {diff*1000:.2f} ms')
+        logger.critical(f'====== {title} took: {diff*1000:.2f} ms ======')
 
 def vectoprint(arr,n=1,perc=False):
     s="%" if perc else "f"
-    return [f"[{i}]{el:.{n}{s}}" for i,el in enumerate(arr)]
+    return [f"[{i}]{el:.{n}{s}}" for i,el in enumerate(arr)]    
 
 ## Generator Class
 @dataclass
@@ -92,7 +94,7 @@ class BESS:
     ch_eff: float = 0.86
     dc_eff: float = 0.83
     lifecycle: float = 8000 
-    capcost_copkwh: float = field(default=1.3e6,repr=False) 
+    capcost_copkwh: float = field(default=1.2e6,repr=False) 
     modulecap_kwh: float = field(default=0.95*4.8,repr=False) #0.95 DoD
     modulepower_kw: float = field(default=4.8,repr=False)
     cap_kwh: float = field(init=False)
@@ -129,6 +131,7 @@ class MG:
         elif max(self.demand_curve_pu)>1:
             raise Exception("in p.u. means at most 1.0")
         else:
+            self.demand_curve_pu=np.array(self.demand_curve_pu)
             self.demand_curve_kw=self.demand_curve_pu*self.peak_demand_kw
         if len(self.Gens)==0:
             raise Exception("No Generators defined")
@@ -163,6 +166,14 @@ class genericStochasticProgram:
         to obtain point performance Joos_i=J(x_dec,xi_out) and average performance E[Joos]=avg(Joos_i).
         [CC testing] point performance test also returns constraint violation freq PrViol.
         """
+    def debug(self,name:str,element,endl=True):
+        """Just a quick debugger on self.logger
+        Args:
+            name (str): description of thingy
+            element (_type_): thingy to debug
+        """
+        self.logger.debug(f"===== {name}: =====\n{element}{"\n" if endl else ""}")
+
     def Joos_i(self,x_dec,testSample,**kwargs):
         """
         Get out of sample cost/performance Joos_i=J(x_dec,xi_i) and PrViol of decision x_dec on a test sample point xi_i.
@@ -200,15 +211,20 @@ class genericStochasticProgram:
         """
 
         if not self.hasBeenSolved:
-            x_dec,Jis=self.solve(trainSampleSet,**kwargs)
+            with timed("solveTest calling solve()",self.logger):
+                x_dec,Jis=self.solve(trainSampleSet,**kwargs)
         else:
-            x_dec,Jis=self.resolve(trainSampleSet,**kwargs)
+            with timed("solveTest calling resolve()",self.logger):
+                x_dec,Jis=self.resolve(trainSampleSet,**kwargs)
         
         # Whether solved or resolved, test the decision
-        Joos,PrViol=self.Joos(x_dec,testSampleSet)
-        reliability=(Joos<=Jis)
-        self.logger.critical(f"Jis: {Jis}")
-        self.logger.critical(f"prvio: {PrViol}")
+        with timed("solveTest calling Joos()",self.logger):
+            Joos,PrViol=self.Joos(x_dec,testSampleSet)
+        reliability=float((Joos<=Jis))
+        self.logger.warning(f"Jis: {Jis}")
+        self.logger.warning(f"Joos: {Joos}")
+        self.logger.warning(f"rel: {reliability}")
+        self.logger.warning(f"prvio: {PrViol}")
         #  PrViol is always a vector
         return x_dec,Jis,Joos,reliability,PrViol
     
@@ -237,8 +253,10 @@ class genericStochasticProgram:
         Joos=list(Joos)
         rel=list(rel)
         prviol=list(prviol)
-        self.logger.critical(f"Jis: {Jis}")
-        self.logger.critical(f"prvio3: {prviol}")
+        self.logger.warning(f"Joos: {Joos}")
+        self.logger.warning(f"Jis: {Jis}")
+        self.logger.warning(f"prviol: {prviol}")
+        self.logger.warning(f"rel: {rel}")
         return x_dec,Jis,Joos,rel,prviol
     
     def iter_traindata(self,trainSampleSets,testSampleSet,paramRange):
@@ -248,7 +266,8 @@ class genericStochasticProgram:
         """
         # self.logger.critical(f"paramrange: {paramRange}")
 
-        for dataset in trainSampleSets:
+        for i,dataset in enumerate(trainSampleSets):
+            self.logger.info(f"Experiment #{i}")
             yield self.simulate(dataset,testSampleSet,paramRange)
 
     def runSimulations(self,trainSampleSets,testSampleSet,paramRange:list=[{}]):
@@ -264,8 +283,9 @@ class genericStochasticProgram:
         Joos=list(Joos)
         rel=list(rel)
         prviol=list(prviol)
-        self.logger.critical(f"Jis: {Jis}")
-        self.logger.critical(f"prvio: {prviol}")
+        self.logger.warning(f"Jis: {Jis}")
+        self.logger.warning(f"prvio: {prviol}")
+        self.logger.warning(f"rel: {rel}")
         self.avgJis=np.mean(Jis,axis=0)
         self.avgJoos=np.mean(Joos,axis=0)
         self.q25Joos=np.quantile(Joos,0.25,axis=0)
@@ -317,8 +337,8 @@ class EDnR(genericStochasticProgram):
     Generic Economic Dispatch with Reserve Wrapper Class. Sample generation functions and misc helper functions.
     """
     def __init__(self,MG:MG,subperiods:int=30,strictlycircularbess:bool=True,BESS_SOE_init=0.0,
-                 plotcolors=None,seed=None,
-                 grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,**kwargs):
+                 plotcolors=None,seed=None,grb_verbose:bool=False,logger_scope:int=1,
+                 logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,**kwargs):
         """
         Generic Economic Dispatch with Reserve Wrapper Class Init.
         
@@ -337,10 +357,10 @@ class EDnR(genericStochasticProgram):
         :param subperiods:
             30. Number of Operation intrahour subperiods.
         :param plotcolors:
-            plt.cm.Set1.colors. matplotlib.colors.ListedColormap plot palette.
+            'Set1'. One of matplotlib.colormaps (name string)
         :param transactive:
             False. Set True for ADMM  
-        :param neighborhs:
+        :param neighbors:
             empty list, len=lenneighbors. For ADMM
         :param rho:
             float. For ADMM
@@ -362,10 +382,10 @@ class EDnR(genericStochasticProgram):
         self.T=24
         self.subperiods=subperiods
         if plotcolors is not None:
-            assert isinstance(plotcolors,mpl.colors.ListedColormap),"plotcolors must be a matplotlib.colors.ListedColormap"
-            self.plotcolors=plotcolors
+            assert plotcolors in mpl.colormaps(), f"plotcolors must be a matplotlib.colormaps. Available: {mpl.colormaps()}"
+            self.plotcolors=mpl.colormaps[plotcolors].colors
         else:    
-            self.plotcolors=plt.cm.Set1.colors
+            self.plotcolors=mpl.colormaps['Set1'].colors
         self.rng=np.random.default_rng(seed)
         self.grb_verbose=grb_verbose
         self.strictlycircularbess=strictlycircularbess
@@ -423,38 +443,49 @@ class EDnR(genericStochasticProgram):
             self.eta_dc=self.MG.BESS.dc_eff
             self.c_chdc_copkwh=self.MG.BESS.dischargecostperkwh
 
-        ## PUT ARGS ABOVE IN CLASS INTERFACE INSTEAD OF KWARGS
-        ## I MEAN EVENTUALLY OFC
-        def wontuse(transactive:bool=False, neighbors:list=[],rho=0,lineCosts=0,lineCapacities=None,z_PC_k=None,z_PV_k=None,lam_C_k=None,lam_V_k=None):
-            return 0
+        if LastInstance is not None:
+            assert not LastInstance=='BESS', "BESS not allowed as Last Instance"
+            # Get the Last Instance Gen
+            for g in self.MG.Gens:
+                if g.type==LastInstance:
+                    assert g.dispatchable, "Last Instance Not Dispatchable"
+                    self.LastInstance=LastInstance
+                    break
+            else: #for-break-else is pretty cool
+                raise Exception(f"Last Instance Not Found: {LastInstance}")
 
         self.transactive=kwargs.get("transactive",False)
-        # When inititatin in TRANSACTIVE MODE
-        # Instance must initiate with Neighbors, linecaps, linecosts, rho, and 0th iteration z and lambdas
+        # When inititating in TRANSACTIVE MODE
+        # Instance must initiate with Neighbors, linecaps, linecosts, rho
         if self.transactive:
-            self.neighborhs=kwargs.get("neighbors",[])
-            self.lenneighbors=len(self.neighborhs)
+            assert "neighbors" in kwargs, "neighbors not set"
+            assert "rho" in kwargs, "rho not set"
+            assert "lineCapacities" in kwargs, "lineCapacities not set"
+            assert "lineCosts" in kwargs, "lineCosts not set"
+            self.neighbors=kwargs.get("neighbors",[])
+            self.lenneighbors=len(self.neighbors)
             if self.lenneighbors==0:
                 raise Exception("transactive EDnR requires neighbors list")
-            self.rho=kwargs.get("rho",0) # ADMM penalty param
-            self.lineCapacities=kwargs.get("lineCapacities",[0]*self.lenneighbors) # Max line capacity with each neighbor (kW)
-            self.lineCosts=kwargs.get("lineCosts",0) # Cost of energy transacted with neighbors ($/kWh)
-            self.z_PC_k=kwargs.get("z_PC_k",np.ones((self.lenneighbors,self.T)))
-            self.z_PV_k=kwargs.get("z_PV_k",np.ones((self.lenneighbors,self.T)))
-            self.lam_C_k=kwargs.get("lam_C_k",np.ones((self.lenneighbors,self.T)))
-            self.lam_V_k=kwargs.get("lam_V_k",np.ones((self.lenneighbors,self.T)))  
-            self.logger.info(f"Instance set for transactive EDnR. rho: {self.rho}, linecaps: {self.lineCapacities}, linecosts: {self.lineCosts}")
+            self.rho=kwargs.get("rho") # ADMM penalty param
+            self.lineCapacities=kwargs.get("lineCapacities") # Max line capacity with each neighbor (kW)
+            self.lineCosts=kwargs.get("lineCosts") # Cost of energy transacted with neighbors ($/kWh)
+            # Z AND LAMBDAS ARE SET ON SOLVE/RESOLVE
+            # self.z_PC_k=kwargs.get("z_PC_k",np.ones((self.lenneighbors,self.T)))
+            # self.z_PV_k=kwargs.get("z_PV_k",np.ones((self.lenneighbors,self.T)))
+            # self.lam_C_k=kwargs.get("lam_C_k",np.ones((self.lenneighbors,self.T)))
+            # self.lam_V_k=kwargs.get("lam_V_k",np.ones((self.lenneighbors,self.T)))  
+            self.logger.warning(f"Instance set for transactive EDnR. neighbors: rho: {self.rho}, linecaps: {self.lineCapacities}, linecosts: {self.lineCosts}")
         else:
-            self.logger.info("Instance set for non-transactive EDnR")   
+            self.logger.warning("Instance set for non-transactive EDnR")   
             
-        if not hasattr(kwargs,"xi_hat"):
-            logging.warning("No training sample provided for Model. Set when solving (non det-nominal).")
+        if not "xi_hat" in kwargs:
+            self.logger.warning("No training sample provided for Model. Set when solving (non det-nominal).")
         else:
             raise NotImplementedError("For now, just set the trainsample when solving")
             # self.createTrainSampleSetVar(kwargs.get("xi_hat"))
         
         # Create Gurobi Model
-        self.M=self.CreateModel(**kwargs)
+        self.M=self.CreateModel(model_name,**kwargs)
         self.sol_time=[]
         # PDF info are init attributes    
         with open('SolarPDF.yaml','r') as f:    
@@ -464,18 +495,18 @@ class EDnR(genericStochasticProgram):
             self.windinfo=yaml.safe_load(f)
     
 
-    def CreateModel(self,**kwargs):
+    def CreateModel(self,model_name=None,**kwargs):
         '''
         Create Economic Dispatch with Reserve Base Gurobi model.
         Makes variables/constraint handlers accessible as self.attributes
         '''
         ### CREATE GUROBI MODEL
-        quirk=kwargs.get("quirk",datetime.strftime(datetime.today(),"%b%d_%H%M%S"))
+        model_name=kwargs.get("model_name",datetime.strftime(datetime.today(),"%b%d_%H%M%S"))
         grb_licence_params=kwargs.get("grb_licence_params",None)
         env=gp.Env(params=grb_licence_params)
-        M=gp.Model(f"EDnR_{quirk}",env=env)
+        M=gp.Model(f"EDnR_{model_name}",env=env)
         M.params.LogToConsole=self.grb_verbose
-        self.logger.info(f"Model \"{quirk}\" created")
+        self.logger.info(f"Model \"{model_name}\" created")
 
         ### MAIN VARIABLE
         self.pG=M.addMVar(shape=(self.Ngen,self.T),name="pG",vtype=GRB.CONTINUOUS)
@@ -484,7 +515,6 @@ class EDnR(genericStochasticProgram):
         self.fobj=gp.LinExpr()
         for t in range(self.T):
             self.fobj+=self.c_gen_copkwh @ self.pG[:,t]
-            
         # SET OBJECTIVE FUNCTION
         M.setObjective(self.fobj,GRB.MINIMIZE)   
         M.update()
@@ -495,46 +525,115 @@ class EDnR(genericStochasticProgram):
         Input training sample as param in Gurobi model, in case used.
         """
         #xihat_dim may be a list
-        xihat_num,*xihat_dim=XiScenarioSet.shape
-        self.xihat_var=self.M.addMVar(shape=(xihat_num,*xihat_dim),vtype=GRB.CONTINUOUS,lb=-GRB.INFINITY)
+        xihat_num,xihat_dim=XiScenarioSet.shape
+        self.xihat_var=self.M.addMVar(shape=(xihat_num,xihat_dim),vtype=GRB.CONTINUOUS,lb=-GRB.INFINITY,ub=GRB.INFINITY)
         self.samplectrt=self.M.addConstr(self.xihat_var==XiScenarioSet,name="samplectrt")
         self.M.update()
         self.logger.info("training sample constraint built")
 
-    def solveTest(self,trainSampleSet,testSampleSet,**kwargs):
+    def solveOrResolve(self,trainSampleSet,**kwargs):
         """
         If hasbeensolved, and given sampleset is same size as current OR currently no sample yet
         (i.e. only det-nominal has been run) calls resolve(), else createmodel() and calls solve().
-        Gets decisions x_dec from trainSampleSet, tests its performance with Joos() over testSampleSet.
-        Returns (x_dec, Jis, Joos, reliability, PrViol) point [corresponding to given trainSampleSet Xi_hat]
         """
+        fullretry=kwargs.get("fullretry",False)
+        if fullretry: self.logger.warning("===== Doing a fullretry =====")
+        
+        if not self.hasBeenSolved and not fullretry:
+            self.logger.warning("Solving for the 1st time.")
+            self.logger.info("Currently:")
+            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            with timed("solveOrResolve calling solve(), first time",self.logger):
+                x_dec,Jis=self.solve(trainSampleSet,**kwargs)
+            self.logger.info("After 1st Solve:")
+            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
 
-        if not self.hasBeenSolved:
-            x_dec,Jis=self.solve(trainSampleSet,**kwargs)
-        elif not hasattr(self,'samplectrt'):
-            self.logger.critical("Resolving. No sample ctrt.")
-            x_dec,Jis=self.resolve(False,trainSampleSet,**kwargs)
-        elif (self.samplectrt.RHS.shape==len(trainSampleSet)):
-            self.logger.warning("Resolving, updating sample ctrt RHS")
-            x_dec,Jis=self.resolve(True,trainSampleSet,**kwargs)    
+        elif not hasattr(self,'samplectrt') and not fullretry:
+            self.logger.warning("Resolving. No sample ctrt.")
+            self.logger.info("Currently:")
+            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            with timed("solveOrResolve calling resolve(), no sampl ctrt",self.logger):
+                x_dec,Jis=self.resolve(False,trainSampleSet,**kwargs)
+            self.logger.info("After resolve:")
+            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+
+        elif (self.samplectrt.RHS.shape[0]==len(trainSampleSet)) and not fullretry:
+            self.logger.debug(f"samplctrt={self.samplectrt.RHS.shape}, given set={len(trainSampleSet)}")
+            self.logger.warning("Resolving, updating samplectrt and/or other constraints.")
+            self.logger.info("Currently:")
+            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            with timed("solveOrResolve calling resolve(), updating sampl ctrt",self.logger):
+                x_dec,Jis=self.resolve(True,trainSampleSet,**kwargs) 
+            self.logger.info("After resolve:")
+            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+               
         else:
-            self.logger.info("New sample size. Recreating whole model and solving lol.")
+            self.logger.debug(f"samplctrt={self.samplectrt.RHS.shape}, given set={len(trainSampleSet)}")
+            self.logger.warning("Recreating whole model and solving lol.")
+            self.logger.info("Currently:")
+            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
             # Recreate Gurobi Model
-            self.M=self.CreateModel(**kwargs)
-            # self.sol_time=[]
-            x_dec,Jis=self.solve(trainSampleSet,**kwargs)                        
+            with timed("solveOrResolve recreating model and calling solve()",self.logger):
+            
+                self.M.remove(self.M.getVars())
+                self.M.remove(self.M.getConstrs())
+                self.M.remove(self.M.getGenConstrs())
+                self.M.update()
+                self.logger.info("After deletion:")
+                self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+                
+                self.M=self.CreateModel(**kwargs)
+                self.M.update()
+                self.logger.info("After creation+update:")
+                self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+                
+                # self.sol_time=[]
+                x_dec,Jis=self.solve(trainSampleSet,**kwargs)
+              
+            self.logger.info("After new solve:")
+            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
 
-            ## EVENTUALLY MAKE IT LESS EXTREME
+            ## Remember i shouldnt do:
             # self.M.remove(self.samplectrt)
             # self.createXiScenarioSetVar(XiScenarioSet)  
             # self.logger.critical("training sample dimension changed. recreated. Fobj 2ndStg costs is most likely incoherent because Nscenarios changed.")
 
-            
+        if Jis==-1:
+            with timed("solveOrResolve failed, calling solveOrResolve()",self.logger):
+
+                self.logger.critical(f"===== FAILED =====\nCurrent kwargs: {kwargs}")
+                if self.HAS_BESS:
+                    if max(self.T_RB_ch_h,self.T_RB_dc_h,self.fpart_bess)<0.01:
+                        raise Exception(f"Retry with different params. kwargs: {kwargs}")
+                    kwargs["T_RB_dc_h"]=np.round(self.T_RB_dc_h*0.8,3)
+                    kwargs["T_RB_ch_h"]=np.round(self.T_RB_ch_h*0.8,3)
+                    kwargs["fpart_bess"]=np.round(self.fpart_bess*0.8,3)
+                cresrv=self.customReserve
+                if min(cresrv["up"],cresrv["down"])>self.peak_demand_kw:
+                    raise Exception(f"Retry with different params. kwargs: {kwargs} ")
+                kwargs["customReserve"]={"up":np.round(cresrv["up"]*1.2,0),
+                                            "down":np.round(cresrv["down"]*1.2,0)}
+                kwargs["fullretry"]=True
+                self.logger.critical(f"RETRYING WITH KWARGS: {kwargs}")
+                x_dec,Jis=self.solveOrResolve(trainSampleSet,**kwargs)
+
+        return x_dec,Jis
+
+
+    def solveTest(self,trainSampleSet,testSampleSet,**kwargs):
+        """
+        Calls solveOrResolve(), gets decisions x_dec from trainSampleSet, tests its performance with Joos() over testSampleSet.
+        Returns (x_dec, Jis, Joos, reliability, PrViol) point [corresponding to given trainSampleSet Xi_hat]
+        """
+        with timed("solveTest calling solveOrResolve()",self.logger):
+            x_dec,Jis=self.solveOrResolve(trainSampleSet,**kwargs)
         # Whether solved or resolved, test the decision
-        Joos,PrViol=self.Joos(x_dec,testSampleSet)
-        reliability=(Joos<=Jis)
-        self.logger.critical(f"Jis: {Jis}")
-        self.logger.critical(f"prvio: {PrViol}")
+        with timed("solveTest calling Joos()",self.logger):
+            Joos,PrViol=self.Joos(x_dec,testSampleSet)
+        reliability=float(Joos<=Jis)
+        self.logger.warning(f"Jis: {Jis}")
+        self.logger.warning(f"prvio: {PrViol}")
+        self.logger.warning(f"rel: {reliability}")
         #  PrViol is always a vector
         return x_dec,Jis,Joos,reliability,PrViol
     
@@ -554,7 +653,7 @@ class EDnR(genericStochasticProgram):
         self.updateNominaltoSampleSetMean(trainSampleSet)
 
         # Reset Pmax constraint with new nominal gen, the one set by heuristic_reserve
-        # Yes, sample set bounds Pmax of Type2/MPPT gens P_ED, any excess generated after PED is accounted for in Operation
+        # Yes, sample set Pmax bounds for P_ED of Type2/MPPT gens, excess generated after PED is accounted for in Operation as eff Dem
         self.pmaxCtrt.RHS=np.vstack([np.array(g.gen_curve_pu)*g.power_kw for g in self.MG.Gens])
         
         # Reset balance constraint RHS with new nominal demand curve
@@ -581,16 +680,13 @@ class EDnR(genericStochasticProgram):
                 raise Exception("Cannot update R_wass.")
             self.logger.info(f"updating rW: {rwass}")
             self.rwass_ctrt.RHS=rwass
-                
-        if None not in {lambdas_C,lambdas_V,z_PC,z_PV}:
-            self.logger.info("updating z and lambda values (RHS) with ADMM parameters passed to resolve()")
-            if not self.transactive:
-                raise Exception("Instance not set for transactive EDnR, cannot pass ADMM parameters. Recreate.")
-            if self.neighborhs==[]:
-                raise Exception("Instance has no neighbors, cannot pass ADMM parameters")
-            if not (self.lenneighbors==len(lambdas_C)==len(lambdas_V)==len(z_PC)==len(z_PV)):
-                raise Exception("ADMM parameter lists must have same length as number of neighbors")
+        
+        if self.transactive:
+            assert lambdas_C is not None and lambdas_V is not None and z_PC is not None and z_PV is not None, "All z and lambdas must be set"
+            assert not self.neighbors==[], "Instance has no neighbors, cannot pass ADMM parameters"
+            assert self.lenneighbors==len(lambdas_C)==len(lambdas_V)==len(z_PC)==len(z_PV),"ADMM parameter lists must have same length as number of neighbors"
             
+            self.logger.info("updating z and lambda values (RHS) with ADMM parameters passed to resolve()")
             self.z_PC_k=z_PC
             self.z_PV_k=z_PV
             self.lam_C_k=lambdas_C
@@ -602,59 +698,67 @@ class EDnR(genericStochasticProgram):
             self.lam_V_ctrt.RHS=self.lam_V_k
     
         # Resolve Model
-        M=self.M
         self.logger.info("solving...")
         try:
-            M.optimize()
+            self.M.optimize()
         except gp.GurobiError as e:
             self.logger.error(f"Uhhh something happened: {e}")
-            self.logger.error(f"{M.NumVars} Vars, {M.NumNZs} Num NZs, {M.NumConstrs} Constraints, {M.NumQConstrs} QConstrts, {M.NumGenConstrs} GenCtrts, {M.NumBinVars} BinVars, {M.NumSOS} SOSCtrts")
-            M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
-        self.sol_time.append(M.Runtime)
-        if M.status==GRB.OPTIMAL:
-            self.logger.info(f"ED solved optimally in {M.Runtime:.2f} seconds")
+            self.logger.error(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            self.M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
+            return None,-1
+        self.sol_time.append(self.M.Runtime)
+        if self.M.status==GRB.OPTIMAL:
+            self.logger.info(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
             self.hasBeenSolved=True
         else:
-            logging.error(f"ED not solved optimally. Status: {M.status}")
+            logging.error(f"ED not solved optimally. Status: {self.M.status}")
             try:
-                M.computeIIS()
-                M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
+                self.M.computeIIS()
+                self.M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
                 logging.error("Irreducible Inconsistent Subsystem written to .ilp")
+                return None,-1
             except gp.GurobiError as e:
                 logging.error(f"Error reported when computing IIS: {e}")
+                return None,-1
         
         # Build Result Data
         if hasattr(self,'ReserveResult'):
-            EDnRresult=types.SimpleNamespace(**self.ReserveResult.__dict__)                 
-            EDnRresult.EDcost=self.M.ObjVal
-            # EDnRcost=ED+R
-            EDnRresult.EDnRcost=EDnRresult.EDcost+EDnRresult.Rcost
+            result=SimpleNamespace(**self.ReserveResult.__dict__)                 
         else:
-            EDnRresult=types.SimpleNamespace()
-            # EDnRcost
-            EDnRresult.EDnRcost=self.M.ObjVal
-            EDnRresult.fpart=self.fpart.X
-            EDnRresult.H_p=self.Rp.X
-            EDnRresult.H_n=self.Rn.X
-            EDnRresult.ResT_p=np.sum(self.Rp.X,axis=0)
-            EDnRresult.ResT_n=np.sum(self.Rn.X,axis=0)
+            result=SimpleNamespace()
+            result.fpart=self.fpart.X
+            result.H_p=self.Rp.X
+            result.H_n=self.Rn.X
+            result.ResT_p=np.sum(self.Rp.X,axis=0)
+            result.ResT_n=np.sum(self.Rn.X,axis=0)
             if hasattr(self,'kappa'):
-                EDnRresult.kappa=self.kappa.X
-        # Pgen[GxT]
-        EDnRresult.Pgen=self.pG.X
+                result.kappa=self.kappa.X
+        
+        result.ObjVal=self.M.ObjVal
+        # GETTING THE DUALS MAY BE A BIT HARDER IN DROW
+        try:
+            result.MPO=self.loadbalanceCtrt.Pi
+        except gp.GurobiError as e:
+            self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
+            fixedmodel=self.M.fixed()
+            fixedmodel.optimize()
+            fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
+            result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
+            assert len(result.MPO)==self.T and (result.MPO>0).all(),"Invalid LMP/MPOs."
+
+        result.Pgen=self.pG.X
         # ADMM variables
         if self.transactive:
-            EDnRresult.P_C=self.P_C.X
-            EDnRresult.P_V=self.P_V.X
-        # PBESS[T],SOE[T]
+            result.P_C=self.P_C.X
+            result.P_V=self.P_V.X
         if self.HAS_BESS:
             pCH_res=self.pCH.X
             pDC_res=self.pDC.X
             SOE_res=self.SOE.X
-            EDnRresult.PDC=pCH_res
-            EDnRresult.PCH=pDC_res
-            EDnRresult.PBESS=pDC_res-pCH_res
-            EDnRresult.SOE=SOE_res
+            result.PCH=pCH_res
+            result.PDC=pDC_res
+            result.PBESS=pDC_res-pCH_res
+            result.SOE=SOE_res
             for t in range(self.T):
                 if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
                     self.logger.critical(f"t={t}")
@@ -662,25 +766,52 @@ class EDnR(genericStochasticProgram):
                     self.logger.critical(f"pDC_res: {pDC_res[:t+1]}")
                     self.logger.critical(f"SOE_res: {SOE_res[:t+1]}")
                     raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
+        
+        c_gen_copkwh_w_bess=self.c_gen_copkwh
+        if self.HAS_BESS: c_gen_copkwh_w_bess=np.append(c_gen_copkwh_w_bess,self.c_chdc_copkwh)   
+        
+        ## CALCULATE REAL COST OF ED+R [D-1] PLANNING: ED, R, PURCHASES AND SALES
+        Cost_of_EDnR=0
+        for t in range(self.T):
+            # P_ED
+            Cost_of_EDnR+=np.sum(self.c_gen_copkwh*result.Pgen[:,t])
+            # P^DC_ED - only pay BESS per kwh cycled aka discharged, "they" pay for the charge up
+            if self.HAS_BESS:
+                Cost_of_EDnR+=self.c_chdc_copkwh*pDC_res[t]
+            # R+ and R-
+            if not hasattr(result,'Rcost'):
+                Cost_of_EDnR+=self.reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(result.H_p[:,t]+result.H_n[:,t]))
+            # buying and selling
+            if self.transactive:
+                for j in (self.lenneighbors):
+                    # if actually buying, add (LAM+lineCost) * P_C
+                    if result.P_C[j,t]>1e-2:
+                        Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
+                    # if actually selling, sub LAM * P_V
+                    if result.P_V[j,t]>1e-2:
+                        Cost_of_EDnR-=self.lam_V_k[j,t]*result.P_V[j,t]        
+        
+        if hasattr(result,'Rcost'):
+            result.EDcost=Cost_of_EDnR
+            result.EDnRcost=result.EDcost+result.Rcost
+        else:
+            result.EDnRcost=Cost_of_EDnR
+    
         if plot_ED:
-            self.plotED(EDnRresult,**kwargs)   
-            
-        return EDnRresult,EDnRresult.EDnRcost #x_dec,Jis
+            self.plotED(result,**kwargs)            
+        return result,result.EDnRcost #x_dec,Jis
 
     # For logically plotting SOE
     @staticmethod
     def SOEvectoplot(vec):
         return np.append(np.roll(vec,1),vec[-1])
     
-    ## DEMAND SAMPLE GENERATION
-    # DONT FUCKING CHANGE ANY OF THIS UNTIL THESIS IS DELIVERED, FUCK YOU
-    # IT IS CLUNKY BUT IT WORKS
-    
-    def randomizeDemand(self,sigma_day=0.03,sigma_period=0.03,sigma_fast=0.05,window=12,**kwargs):
-    # def randomizeDemand(self,sigma_day=0.12,sigma_period=0.12,sigma_fast=0.15,window=12,**kwargs):
+    # def randomizeDemand(self,sigma_day=0.01,sigma_period=0.01,sigma_fast=0.02,window=12,**kwargs):
+    # def randomizeDemand(self,sigma_day=0.08,sigma_period=0.08,sigma_fast=0.08,window=12,**kwargs):
+    def randomizeDemand(self,sigma_day=0.12,sigma_period=0.12,sigma_fast=0.15,window=12,**kwargs):
         # ###### Remember, #P(-2*sigma<dev<+2*sigma)=95%, 3sigma~99.7%
 
-        # ADDITIVE RANDOMNESS, FINISH LATER
+        # ADDITIVE RANDOMNESS INSTEAD OF MULTIPLICATIVE; MAY FINISH LATER
         # # Daily variation
         # dayDev_kw=(dayDev:=self.rng.normal(0,sigma_day))*self.peak_demand_kw_smpgen 
         # # Period-wise variation
@@ -699,7 +830,7 @@ class EDnR(genericStochasticProgram):
         # fastDemCurve_LPF=np.convolve(fastDemCurve,LPFimpResp,mode='valid') #LPF aka promedio movil
         # # return fastDemCurve_LPF,dayDev
     
-        # OLD, WORKS, BUT SHIFTS MEAN BC GEOMETRIC, REWORK IT TO AVOID SHIFTING, CLUNKY UX
+        # IT WORKS, BUT MAY SHIFT SAMPLE MEAN A BIT TOO MUCH BC GEOMETRIC RANDOMNESS
         # Daily variation
         realPeak=self.peak_demand_kw_smpgen*(dayDev:=self.rng.normal(1,sigma_day))
         # Period variation
@@ -720,7 +851,7 @@ class EDnR(genericStochasticProgram):
             return [self.SPVPower(gti,PnomAtSTC_kw) for gti in GTI_Wm2]
         else:
             return GTI_Wm2*PnomAtSTC_kw/1000
-    def SolarRand(self,PnomAtSTC_kw,window=9,subsubperiods=3,roll_hours=0.2):
+    def SolarRand(self,PnomAtSTC_kw,window=7,subsubperiods=2,roll_hours=0.2):
         """Pout y Delta Pout con respecto al promedio.
         Con base en Puerto Carreño (Solcast).
         SoLO IMPLEMENTADO A T=24"""
@@ -771,7 +902,7 @@ class EDnR(genericStochasticProgram):
                 return min(po,pomax_unit)
             else:
                 return 0
-    def WindRand(self,N_100kw_units,window=5,subsubperiods=1):
+    def WindRand(self,N_100kw_units,window=9,subsubperiods=1):
         """Pout y DeltaPout con respecto al promedio.
         Con base en Sardinata (PDF de NASA Power
         renormalizado al promedio global de GlobalWindAtlas).
@@ -783,6 +914,7 @@ class EDnR(genericStochasticProgram):
             cutavg=sum(sample)/len(sample) if len(sample)>0 else min_
             return cutavg
         fastWSCurve=np.zeros(self.T*self.subperiods)
+        # self.logger.debug(f"size: {fastWSCurve.shape}")
         # Fill fastWSCurve
         for t in range(self.T):
             pdf_t=self.windinfo['wind'][t]
@@ -804,13 +936,15 @@ class EDnR(genericStochasticProgram):
 
     def generateDaySample(self,**kwargs):
         """Generate one Sample containing random Demand and Random Type 2 (MPPT) Solar and Wind Generation, if available."""
-        xi_i=types.SimpleNamespace()
+        xi_i=SimpleNamespace()
         xi_i.subperiods=self.subperiods
         xi_i.fastDemandCurve,xi_i.dayDev=self.randomizeDemand(**kwargs)
         if self.solarMPPTavailable:
-            xi_i.fastPSolar=self.SolarRand(PnomAtSTC_kw=self.solar_powernom_kw_smpgen)
+            xi_i.fastPSolar=self.SolarRand(PnomAtSTC_kw=self.solar_powernom_kw_smpgen,**kwargs)
+            # self.logger.debug(f"size: {xi_i.fastPSolar.shape}")
         if self.windMPPTavailable:
-            xi_i.fastPWind=self.WindRand(N_100kw_units=self.N100kWT_smpgen)
+            xi_i.fastPWind=self.WindRand(N_100kw_units=self.N100kWT_smpgen,**kwargs)
+            # self.logger.debug(f"size: {xi_i.fastPWind.shape}")
         return xi_i
     
     def generateSampleSet(self,Nsamples,**kwargs):
@@ -819,7 +953,7 @@ class EDnR(genericStochasticProgram):
             
     ## RECOURSE ACTION
     # Microgrid Operation - Reserve Execution 
-    def MGOperation(self,EDnRres,day_sample,/,Type3HasReconCost=True,plot_op=False,plotFastEffDemand=True,plotDeltaSOE=True):
+    def MGOperation(self,EDnRres,day_sample,/,Type2HasReconCost=True,plot_op=False,plotFastEffDemand=True,plotDeltaSOE=True,plot_DeltaPrnw=False):
         # clear_output()
         assert day_sample.subperiods==self.subperiods, "Sample subperiods do not match"
         assert hasattr(self,"LastInstance"), "Last Instance Gen name not specified"
@@ -832,6 +966,8 @@ class EDnR(genericStochasticProgram):
         else: #for-break-else is pretty cool
             raise Exception("Last Instance Not Found")
         
+        # with timed("MGOperation --- creating fastEffDem",self.logger):
+
         # Get Randomized Demand from sample
         fastDemCurve,dayDev=day_sample.fastDemandCurve,day_sample.dayDev
         # Get Randomized (Max) Generation (for Intermittents T2) from sample
@@ -851,10 +987,12 @@ class EDnR(genericStochasticProgram):
         if(self.solarMPPTavailable|self.windMPPTavailable):
             fastEffDem-=fastDeltaGenCurve
 
+        # with timed("MGOperation --- Executing Recourse",self.logger):
+
         ### Execute ED+Recourse Actions
         Nsources=self.Ngen+self.HAS_BESS
         DeltaT=24/(self.T*self.subperiods) # en horas
-        DeltaPG=np.zeros([Nsources,self.T])
+        DeltaPG=np.zeros((Nsources,self.T))
         Nundermargin=Novermargin=0
         if self.HAS_BESS:
             Noverdischarge=Novercharge=0
@@ -872,12 +1010,21 @@ class EDnR(genericStochasticProgram):
         # self.logger.debug(EDnRres.fpart)
         # self.logger.debug(EDnRres.H_n)
         # self.logger.debug(EDnRres.ResT_p)
-            
+
+        # attempt 2
+        # Build op cost matrix (Nsources x T) to plot_op
+        # op_cost=np.zeros((Nsources,self.T))
+        # idxdispatchable=[i for i,g in enumerate(self.MG.Gens) if g.dispatchable]
+        # if self.HAS_BESS:
+        #     idxdispatchable.append(-1)
+        
+
         for tf,dem in enumerate(fastEffDem):
             tper,tmod=divmod(tf,self.subperiods)
             periodForecastedDem=self.demand_curve_kw[tper]
             DeltaPL=dem-periodForecastedDem
             # self.logger.debug(f"tf:{tf}, DeltaPL:{DeltaPL}\n")
+            # self.logger.debug(f"DeltaPG[:,tper]: {DeltaPG[:,tper]}\n")
             if DeltaPL==0: # No Recourse
                 # DeltaPG[:,tper] += np.zeros(Nsources,1)
                 continue
@@ -886,145 +1033,240 @@ class EDnR(genericStochasticProgram):
                 # self.logger.debug(f"DeltaPL-EDnRres.ResT_p[tper]: {DeltaPL-EDnRres.ResT_p[tper]}")
                 if (overmargin:=DeltaPL-EDnRres.ResT_p[tper])>=0:
                     Novermargin+=1
-                    # Recourse = (Holguras Totales + Overmargin) del Last Instance * DeltaT
-                    # self.logger.debug(f"DeltaPG[:,tper]: {DeltaPG[:,tper]}\n")
+                    # Recourse = (Holguras Totales + Overmargin del Last Instance) * DeltaT
                     DeltaPG[:,tper] += EDnRres.H_p[:,tper]*DeltaT 
-                    # self.logger.debug(f"DeltaPG[:,tper]: {DeltaPG[:,tper]}\n")
                     DeltaPG[iLI,tper] += overmargin*DeltaT
-                    # self.logger.debug(f"DeltaPG[:,tper]: {DeltaPG[:,tper]}\n")
                 else:
                     # Recourse = fpart * DeltaPL * DeltaT
                     DeltaPG[:,tper] += EDnRres.fpart[:,tper]*DeltaPL*DeltaT 
             elif DeltaPL<0: # Negative Recourse
                 if (undermargin:=-DeltaPL-EDnRres.ResT_n[tper])>=0:
                     Nundermargin+=1
-                    # Recourse = (Holguras Totales + Overmargin) del Last Instance * DeltaT
+                    # Recourse = (Holguras Totales + Overmargin del Last Instance) * DeltaT
                     DeltaPG[:,tper] -= EDnRres.H_n[:,tper]*DeltaT 
                     DeltaPG[iLI,tper] -= undermargin*DeltaT
                 else:
                     # Recourse = fpart * DeltaPL * DeltaT
                     DeltaPG[:,tper] += EDnRres.fpart[:,tper]*DeltaPL*DeltaT
                 # Recourse = (Holguras Totales + Overmargin) del Last Instance * DeltaT
+            # self.logger.debug(f"DeltaPG[:,tper]: {DeltaPG[:,tper]}\n")
             
-            # Update BESS SOE wrt Recourse actions
-            # SOE[2] = SOE(t=2:59), al final del periodo
-            if self.HAS_BESS and not (tmod-(self.subperiods-1)):
-                # is battery net charging? (ED + recourse) 
-                charging_at_period = (EDnRres.PBESS[tper]+DeltaPG[-1,tper])<0
-                # then SOE at period increases with eta_ch
-                DeltaSOE[tper] = - DeltaPG[-1,tper] * (24/self.T) * (charging_at_period*self.eta_ch + (not charging_at_period)/self.eta_dc)
-                    # can recourse actions make BESS ch and dc within same period? sure
-                    # but meh it's rare enough and (eta_ch-eta_dc are similar enough)
-                    # to ignore subperiod efficiency changes
-                    
-                # then acumulate/cumsum DeltaSOE up to t:59
-                # on top of EDnRres.SOE to get SOE_real
-                SOE_real[tper] = EDnRres.SOE[tper] + np.sum(DeltaSOE)
-                # (it doesn't matter if circular or not, SOE(0:00) shouldn't change)
-                # self.logger.debug(f"EDnRres.SOE:  {vectoprint(EDnRres.SOE)}")
-                # self.logger.debug(f"DeltaSOE:     {vectoprint(DeltaSOE)}")            
-                # self.logger.debug(f"SOE_real t={tper}: {vectoprint(SOE_real)}\n")
-                if (overcharge_kwh:=SOE_real[tper] - self.CE_bess_kwh)>=0:
-                    # assert charging_at_period, f"not ch, weird t=[{tper}]"
-                    # if charging_at_period: self.logger.debug(f"not ch, weird t=[{tper}]")
-                    # not really weird, been at max for a while
-                    Novercharge+=1
-                    SOE_real[tper] = self.CE_bess_kwh
-                    DeltaSOE[tper] -= overcharge_kwh
-                    overchargingpower_kw = overcharge_kwh  / ((24/self.T) * self.eta_ch)
-                    DeltaPG[-1,tper] += overchargingpower_kw
-                    DeltaPG[iLI,tper] -= overchargingpower_kw
-                elif (overdischarge_kwh:= 0 - SOE_real[tper])>=0:
-                    # assert not charging_at_period, f"not dc, weird t=[{tper}]"
-                    # if not charging_at_period: self.logger.debug(f"not dc, weird t=[{tper}]")
-                    # not really weird, been at 0 for a while
-                    Noverdischarge+=1
-                    SOE_real[tper] = 0
-                    DeltaSOE[tper] += overdischarge_kwh
-                    overdischargingpower_kw = overdischarge_kwh  / ((24/self.T) * self.eta_ch)
-                    DeltaPG[-1,tper] -= overdischargingpower_kw
-                    DeltaPG[iLI,tper] += overdischargingpower_kw
-
-        # Update BESS SOE wrt Recourse actions
-        ## SOE[2] = SOE(t=2:59), al final del periodo
-        # if self.HAS_BESS:
-        #     Noverdischarge=Novercharge=0
-        #     # calculate DeltaSOE
-        #     DeltaSOE=np.zeros(self.T)
-        #     SOE_real=np.zeros(self.T)
-        #     self.logger.debug(f"EDnRres.SOE: {vectoprint(EDnRres.SOE)}")
-        #     self.logger.debug(f"DeltaPB: {vectoprint(DeltaPG[-1,:])}")
-        #     for period,deltaPB in enumerate(DeltaPG[-1,:]):
-        #         # is battery net charging? (ED + recourse) 
-        #         charging_at_period = (EDnRres.PBESS[period]+deltaPB)<0
-        #         # then SOE at period increases with eta_ch
-        #         DeltaSOE[period] = - deltaPB * (24/self.T) * (charging_at_period*self.eta_ch + (not charging_at_period)/self.eta_dc)                
-        #             # can recourse actions make BESS ch and dc within same period? sure
-        #             # but meh it's rare enough and (eta_ch-eta_dc are similar enough)
-        #             # to ignore subperiod efficiency changes
+            # Al final del periodo (tfast+1)%subperiods=0
+            if (tmod-(self.subperiods-1))==0:
+                if self.HAS_BESS:
+                # Actualizar SOE wrt Recourse actions
+                # SOE[2] = SOE(t=2:59), al final del periodo
+                # and if SOE nin [0,CE] anular over(dis)charge trasladando AGC a LI
+                    # is battery net charging? (ED + recourse) 
+                    charging_at_period = (EDnRres.PBESS[tper]+DeltaPG[-1,tper])<0
+                    # then SOE at period increases with eta_ch
+                    DeltaSOE[tper] = - DeltaPG[-1,tper] * (24/self.T) * (charging_at_period*self.eta_ch + (not charging_at_period)/self.eta_dc)
+                        # can recourse actions make BESS ch and dc within same period? sure
+                        # but meh it's rare enough and (eta_ch-eta_dc are similar enough)
+                        # to ignore subperiod efficiency changes
+                        
+                    # then acumulate/cumsum DeltaSOE up to t:59
+                    # on top of EDnRres.SOE to get SOE_real
+                    SOE_real[tper] = EDnRres.SOE[tper] + np.sum(DeltaSOE)
+                    # (it doesn't matter if circular or not, SOE(0:00) shouldn't change)
+                    # self.logger.debug(f"EDnRres.SOE:  {vectoprint(EDnRres.SOE)}")
+                    # self.logger.debug(f"DeltaSOE:     {vectoprint(DeltaSOE)}")            
+                    # self.logger.debug(f"SOE_real t={tper}: {vectoprint(SOE_real)}\n")
+                    if (overcharge_kwh:=SOE_real[tper] - self.CE_bess_kwh)>=0:
+                        # if charging_at_period: self.logger.debug(f"not ch, weird t=[{tper}]")
+                        # not really weird, been at max for a while
+                        Novercharge+=1
+                        SOE_real[tper] = self.CE_bess_kwh
+                        DeltaSOE[tper] -= overcharge_kwh
+                        overchargingpower_kw = overcharge_kwh  / ((24/self.T) * self.eta_ch)
+                        DeltaPG[-1,tper] += overchargingpower_kw
+                        DeltaPG[iLI,tper] -= overchargingpower_kw
+                    elif (overdischarge_kwh:= 0 - SOE_real[tper])>=0:
+                        # if not charging_at_period: self.logger.debug(f"not dc, weird t=[{tper}]")
+                        # not really weird, been at 0 for a while
+                        Noverdischarge+=1
+                        SOE_real[tper] = 0
+                        DeltaSOE[tper] += overdischarge_kwh
+                        overdischargingpower_kw = overdischarge_kwh  / ((24/self.T) * self.eta_ch)
+                        DeltaPG[-1,tper] -= overdischargingpower_kw
+                        DeltaPG[iLI,tper] += overdischargingpower_kw
+            
+            # ### attemp/AFTER_2 : do it but at period transitions
+            # op_cost_tper=np.zeros(Nsources)
+            # # Luego si Calcular costos de AGC al final de periodo
+            # for idx in range(Nsources):
+            #     if DeltaPG[idx,tper]==0:
+            #         continue
+            #     elif DeltaPG[idx,tper]>0: # Above PED
+            #         op_cost_tper[]+=cost_agc_copkwh_max[:,t]*DeltaPG[idx]
+            #         total_op_cost+=max(EDnRres.MPO[tper],self.c_gen_copkwh[i])*myDeltaPgen_at_tper
+            #     elif DeltaPG[idx,tper]<0: # Below PED
+            #         total_op_cost+=price_min*myDeltaPgen_at_tper
+            
+            # # Mas bien, if NOT, recorta sus indices (if mpptavail) del op_cost, before np.sum() and plot
+            # # aja pero los tendria que recortar al final mas bien xdddd
+            # # stick to after_1
+            # if Type2HasReconCost:
+            #     if self.solarMPPTavailable:
+            #         self.debug("fastDeltaPSolar",fastDeltaPSolar)
+            #         if (spv_gen:=np.sum(fastDeltaPSolar[tper*self.subperiods:tf+1])) >=0:
+            #             op_cost_tper += max(EDnRres.MPO[tper],self.c_gen_copkwh[self.idx_solarMPPT]) * spv_gen
+            #         else:
+            #             op_cost_tper += min(EDnRres.MPO[tper],self.c_gen_copkwh[self.idx_solarMPPT]) * spv_gen
+            #     if self.windMPPTavailable:
+            #         self.debug("fastDeltaPWind",fastDeltaPWind)
+            #         if (wt_gen:=np.sum(fastDeltaPWind[tper*self.subperiods:tf+1])) >=0:
+            #             op_cost_tper += max(EDnRres.MPO[tper],self.c_gen_copkwh[self.idx_windMPPT]) * wt_gen
+            #         else:
+            #             op_cost_tper += min(EDnRres.MPO[tper],self.c_gen_copkwh[self.idx_windMPPT]) * wt_gen
+            
+            # # Put on op_cost
+            # op_cost[:,tper]=op_cost_tper
+            
+        # IF Type3 NO REC cost CLIP MPPT from op_cost, then np.sum()
+        # then plot 
                 
-        #         # then acumulate cumsum(DeltaSOE) on top of EDnRres.SOE up to t:59 to get SOE_real
-        #         SOE_real[period] = EDnRres.SOE[period] + np.sum(DeltaSOE[:period+1])
-        #         # (it doesn't matter if circular or not, SOE(0:00) shouldn't change)
-        #         self.logger.debug(f"EDnRres.SOE:  {vectoprint(EDnRres.SOE)}")
-        #         self.logger.debug(f"DeltaSOE:     {vectoprint(DeltaSOE)}")            
-        #         self.logger.debug(f"SOE_real t={period}: {vectoprint(SOE_real)}\n")
-                    
-        #         if (overcharge_kwh:=SOE_real[period] - self.CE_bess_kwh)>=0:
-        #             # assert charging_at_period, f"not ch, weird t=[{period}]"
-        #             Novercharge+=1
-        #             SOE_real[period] = self.CE_bess_kwh
-        #             DeltaSOE[period] -= overcharge_kwh
-        #             overchargingpower_kw = overcharge_kwh  / ((24/self.T) * self.eta_ch)
-        #             DeltaPG[-1,period] += overchargingpower_kw
-        #             DeltaPG[iLI,period] -= overchargingpower_kw
-
-        #         elif (overdischarge_kwh:=0 - SOE_real[period])>=0:
-        #             # assert not charging_at_period, f"not dc, weird t=[{period}]"
-        #             Noverdischarge+=1
-        #             SOE_real[period] = 0
-        #             DeltaSOE[period] += overdischarge_kwh
-        #             overdischargingpower_kw = overdischarge_kwh * self.eta_dc / (24/self.T)
-        #             DeltaPG[-1,period] -= overdischargingpower_kw
-        #             DeltaPG[iLI,period] += overdischargingpower_kw
-
+        ### Calculate cost for t for all dispatchables, including BESS
+        # =========================
+        ## BEFORE : Cost for DeltaPgen in Op is the same as in ED [symmetric]
+        # idxdispatchable=[i for i,g in enumerate(self.MG.Gens) if g.dispatchable]
+        # disp_gennames=[self.MG.Gens[i].type for i in idxdispatchable]
+        # disp_c_gens_copkwh=[self.MG.Gens[i].rate_copkwh for i in idxdispatchable]
         # if self.HAS_BESS:
-            # self.logger.debug(f"DeltaSOE: {vectoprint(DeltaSOE)}")            
-            # self.logger.debug(f"SOE_real: {vectoprint(SOE_real)}")
-            # self.logger.debug(f"Novercharge: {Novercharge/24.:2%}")
-            # self.logger.debug(f"Noverdischarge: {Noverdischarge/24.:2%}")
+        #     idxdispatchable.append(-1)
+        #     disp_gennames.append('BESS')
+        #     disp_c_gens_copkwh.append(self.c_chdc_copkwh)
+        # c_gens_tiled=np.tile(disp_c_gens_copkwh,(self.T,1)).T
+
+        # # se recorta, unicamente se visualiza DelPG de los dispatchable (Ndisp,T), Ndisp<=Nsources
+        # op_cost=c_gens_tiled*DeltaPG[idxdispatchable,:]
+        # # self.logger.debug(f"idxdispatchable:{idxdispatchable}, disp_gennames:{disp_gennames}, disp_c_gens_copkwh: {disp_c_gens_copkwh}")
+        # # self.logger.debug(f"c_gens_tiled:{c_gens_tiled}")
+        # # self.logger.debug(f"DeltaPG: {DeltaPG},\n\n,opcost:{op_cost}")
+        # total_op_cost=np.sum(op_cost)
+        # # If Type 2s play in recourse cost, add it to opcost
+        # # y aun asi no se visualiza
+        # if Type2HasReconCost:
+        #     if self.solarMPPTavailable:
+        #         total_op_cost+=sum(self.MG.Gens[self.idx_solarMPPT].rate_copkwh*fastDeltaPSolar)
+        #     if self.windMPPTavailable:
+        #         total_op_cost+=sum(self.MG.Gens[self.idx_windMPPT].rate_copkwh*fastDeltaPWind)
+        # =========================
         
 
-        ### BATERIA NO PUEDE BAJAR DE SOE 0%, LO FALTANTE LO ENTREGA LASTINSTANCE
-        ### Y AÑADE A PRVIOL
-        # tengo que tener 2 prviol, uno de Rtot in (Rmax,Rmin), otra de SOE in (SOEmax,SOEmin)
-        
-        #### CHECKEA, EL SOE RESULTANTE CORRESPONDE AL PERIODO CORRECTO WRT PBESS? (creo que si, recheck tho)
+        # with timed("MGOperation --- Calculating Recourse cost",self.logger):
 
 
-        # Calculate cost for t for all dispatchables, including BESS
-        idxdispatchable=[i for i,g in enumerate(self.MG.Gens) if g.dispatchable]
-        disp_gennames=[self.MG.Gens[i].type for i in idxdispatchable]
-        disp_c_gens_copkwh=[self.MG.Gens[i].rate_copkwh for i in idxdispatchable]
-        if self.HAS_BESS:
-            idxdispatchable.append(-1)
-            disp_gennames.append('BESS')
-            disp_c_gens_copkwh.append(self.c_chdc_copkwh)
+        ### AFTER_1 : Cost for DeltaPgen>0 is max(c_i,LMP), for DeltaPgen<0 is min(c_i,LMP) [asymmetric]. 
+        # Not quite CREG 64/2000 bc no "ED ideal" but asymmetric rate is important
+        # EXCEPT THE BESS, IT SHOULD BE PAID THE SAME OFC        
+        disp_c_gens_copkwh=deepcopy(self.c_gen_copkwh)
+        # self.logger.debug(f"disp_c_gens_copkwh:{disp_c_gens_copkwh} ==== EDnRres.MPO;{EDnRres.MPO}")
+        # self.logger.debug(f"disp_c_gens_copkwh:{disp_c_gens_copkwh.shape} ==== EDnRres.MPO;{EDnRres.MPO.shape}")
         c_gens_tiled=np.tile(disp_c_gens_copkwh,(self.T,1)).T
-
-        op_cost=c_gens_tiled*DeltaPG[idxdispatchable,:]
-        # self.logger.debug(f"idxdispatchable:{idxdispatchable}, disp_gennames:{disp_gennames}, disp_c_gens_copkwh: {disp_c_gens_copkwh}")
+        mpo_tiled=np.tile(EDnRres.MPO,(len(disp_c_gens_copkwh),1))
         # self.logger.debug(f"c_gens_tiled:{c_gens_tiled}")
-        # self.logger.debug(f"DeltaPG: {DeltaPG},\n\n,opcost:{op_cost}")
-        total_op_cost=np.sum(op_cost)
-        # If Type 2s play in recourse cost, add it to opcost
-        if Type3HasReconCost:
-            if self.solarMPPTavailable:
-                total_op_cost+=sum(self.MG.Gens[self.idx_solarMPPT].rate_copkwh*fastDeltaPSolar)
-            if self.windMPPTavailable:
-                total_op_cost+=sum(self.MG.Gens[self.idx_windMPPT].rate_copkwh*fastDeltaPWind)
-        # Calculate period real (effective) demand
+        # self.logger.debug(f"c_gens_tiled:{c_gens_tiled.shape}")
+        # self.logger.debug(f"mpo_tiled:{mpo_tiled}")
+        # self.logger.debug(f"mpo_tiled:{mpo_tiled.shape}")
+        _cost_agc_auxmtx=np.stack([c_gens_tiled,mpo_tiled])
+        # self.logger.debug(f"_cost_agc_auxmtx:{_cost_agc_auxmtx}")
+        # self.logger.debug(f"_cost_agc_auxmtx:{_cost_agc_auxmtx.shape}")
+        cost_agc_copkwh_max=np.max(_cost_agc_auxmtx,axis=0)
+        # self.debug("cost_agc_copkwh_max",cost_agc_copkwh_max)
+        cost_agc_copkwh_min=np.min(_cost_agc_auxmtx,axis=0)
+        # self.debug("cost_agc_copkwh_min",cost_agc_copkwh_min)
+
+        # Calculate period real (effective) demand before touching DeltaPG
         realEffDemand=self.demand_curve_kw+np.sum(DeltaPG,axis=0)
+        
+        # normally, reconcile w the MPPTs over DeltaPgen
+        if Type2HasReconCost:
+            if self.solarMPPTavailable:
+                for t in range(self.T):
+                    DeltaPG[self.idx_solarMPPT,t]=np.sum(fastDeltaPSolar[t*self.subperiods:(t+1)*self.subperiods])
+            if self.windMPPTavailable:
+                for t in range(self.T):
+                    DeltaPG[self.idx_windMPPT,t]=np.sum(fastDeltaPWind[t*self.subperiods:(t+1)*self.subperiods])
+        # OFC this will add to DeltaPG although it was already considered in effective demand on sample average calculations
+        # hence why we touch it afterwards, only to obtain the correct c_gens_tiled
+
+        # watch this logical array selection magic
+        isPgeq0=DeltaPG[:self.Ngen,:]>=0
+        isPlessthan=~isPgeq0
+        self.logger.debug(f"c_gens_tiled:{c_gens_tiled}\n")
+        self.logger.debug(f"isPgeq0:{isPgeq0}\n")
+        self.logger.debug(f"isPlessthan:{isPlessthan}\n")
+        # huzzah correct asymmetric agc prices according to logical indexing
+        c_gens_tiled=isPgeq0*cost_agc_copkwh_max + isPlessthan*cost_agc_copkwh_min
+        self.debug("c_gens_tiled",c_gens_tiled)
+        
+        # get idxdispatchable just in case
+        idxdispatchable=[i for i,g in enumerate(self.MG.Gens) if g.dispatchable]
+        # i only plot agc service of non-T2's even if they get paid for it
+        disp_gennames=deepcopy(self.gennames)
+        if self.HAS_BESS:
+            idxdispatchable.append(-1) # do get last one
+            disp_gennames.append('BESS')
+            # concat Bess agc cost to c tiled
+            c_gens_tiled=np.concatenate([c_gens_tiled,np.tile(self.c_chdc_copkwh,(1,24))],axis=0)
+        self.debug("idxdispatchable",idxdispatchable)
+        self.debug("c_gens_tiled",c_gens_tiled)
+        self.debug("disp_gennames",disp_gennames)
+
+        # get op cost mtx, includes MPPT
+        op_cost=c_gens_tiled*DeltaPG
+        self.debug("op_cost",op_cost)
+
+        # normally they get paid for agc as rec, as incentive to operator to predict better
+        if Type2HasReconCost:
+            # calculate sum
+            total_op_cost=np.sum(op_cost)
+            if not plot_DeltaPrnw:
+                op_cost=op_cost[idxdispatchable,:]
+                disp_gennames=[n for i,n in enumerate(self.gennames) if i in idxdispatchable]+self.HAS_BESS*['BESS']
+        else:
+            # se recortan sus idx de la matriz de costos
+            op_cost=op_cost[idxdispatchable,:]
+            # y del display
+            disp_gennames=[n for i,n in enumerate(self.gennames) if i in idxdispatchable]+self.HAS_BESS*['BESS']
+            # then calculate total op cost
+            total_op_cost=np.sum(op_cost)
+        
+        
+        # attempt 1.5
+        # total_op_cost=0
+        # for t in range(self.T):
+        #     # overload
+        #     if (DeltaPG[:self.Ngen,t]>=0).all():
+        #         total_op_cost+=cost_agc_copkwh_max[:,t]*DeltaPG[idx_gens_rec,t]
+        #     # underload
+        #     elif (DeltaPG[:self.Ngen,t]<=0).all():
+        #         total_op_cost+=cost_agc_copkwh_min[:,t]*DeltaPG[idx_gens_rec,t]
+        #     else:
+        #         self.logger.debug(f"huh, at t:{t}: {DeltaPG[idx_gens_rec,t]}")
+        #         # MUST PUT COST THINGS INSIDE FAST CYCLE OR DO ANOTHER THINGIE
+        #         # FOR THE COST OF iLI
+        #     if self.HAS_BESS:
+        #         total_op_cost+=self.c_chdc_copkwh*DeltaPG[-1,t]
+        
+        # # If Type 2s play in recourse cost, add it to opcost
+        # # ONLY WAY IS TO PUT IT INSIDE A BIG CYCLE TO INDEX WITH fast_i//subperiods
+        # # OR JUST FUCKING MOVE IT UP ABOVE TOO
+        # if Type2HasReconCost:
+        #     if self.solarMPPTavailable:
+        #         for f in fastDeltaPSolar:
+        #             if f>=0:
+        #                 total_op_cost+=np.max(EDnRres.MPO,self.MG.Gens[self.idx_solarMPPT].rate_copkwh) * f
+        #             else:
+        #                 total_op_cost+=min(EDnRres.MPO,self.MG.Gens[self.idx_solarMPPT].rate_copkwh) * f
+        #     if self.windMPPTavailable:
+        #             for f in fastDeltaPWind:
+        #                 if f>=0:
+        #                     total_op_cost+=max(EDnRres.MPO,self.MG.Gens[self.idx_windMPPT].rate_copkwh) * f
+        #                 else:
+        #                     total_op_cost+=min(EDnRres.MPO,self.MG.Gens[self.idx_windMPPT].rate_copkwh) * f
+        # if self.HAS_BESS: disp_gennames.append('BESS')
         
         # Plot
         if plot_op:
@@ -1090,12 +1332,13 @@ class EDnR(genericStochasticProgram):
             # ax1.text(0.01,0.02,f"Desv. del pico diario={dayDev-1:.2%}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
             ax1.text(0.01,0.06,f"Rec. RSF=${total_op_cost:,.0f} COP",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
             ax1.text(0.81,0.06,f"Fuera de margen={Nundermargin+Novermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
-            # ax1.text(0.81,0.02,f"Submarg={Nundermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
+            # ax1.text(0.81,0.02,f"Sobremarg={Novermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
+            # ax1.text(0.81,0.06,f"Submarg={Nundermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
             fig.set_dpi(500)
             plt.tight_layout()
             plt.show()
 
-        operationResult=types.SimpleNamespace()
+        operationResult=SimpleNamespace()
         operationResult.RecCost=total_op_cost
         operationResult.Nover=Novermargin
         operationResult.Nunder=Nundermargin
@@ -1108,7 +1351,7 @@ class EDnR(genericStochasticProgram):
         """Calls MGOperation() with one (day) test sample to get (instance) out of sample cost.
         
         **MGOp kwargs**:
-            Type3HasReconCost=True,plot_op=False,plotFastEffDemand=True,plotDeltaSOE=True
+            Type2HasReconCost=True,plot_op=False,plotFastEffDemand=True,plotDeltaSOE=True
         """
         attr={"EDnRcost","fpart","ResT_p","ResT_n"}
         for a in attr: 
@@ -1129,27 +1372,29 @@ class EDnR(genericStochasticProgram):
         """Returns expected Demand and Type 2 (MPPT) generation (if available) from Sample.
         For use in ED (24 periods)."""
         Nsamples=len(DaySamplesSet)
-        avgDaySample=types.SimpleNamespace()
+        avgDaySample={}
         # Demand
         avgDemCurve=np.zeros(self.T)
         for samp in DaySamplesSet:
             avgDemCurve+=[sum(samp.fastDemandCurve[i*self.subperiods:(i+1)*self.subperiods])/self.subperiods for i in range(self.T)]
         avgDemCurve/=Nsamples
-        avgDaySample.demand_curve_kw=np.round(avgDemCurve,0)
+        avgDaySample['demand_curve_kw']=np.round(avgDemCurve,0)
+        avgDaySample['demand_curve_pu']=avgDaySample['demand_curve_kw']/self.peak_demand_kw
+
         # Solar Type2
         if self.solarMPPTavailable:
             avgPsolarCurve=np.zeros(self.T)
             for samp in DaySamplesSet:
                 avgPsolarCurve+=[sum(samp.fastPSolar[i*self.subperiods:(i+1)*self.subperiods])/self.subperiods for i in range(self.T)]
             avgPsolarCurve/=Nsamples
-            avgDaySample.Psolar_kw=np.round(avgPsolarCurve,0)
+            avgDaySample['Psolar_kw']=np.round(avgPsolarCurve,0)
         # Wind Type2
         if self.windMPPTavailable:
             avgPwCurve=np.zeros(self.T)
             for samp in DaySamplesSet:
                 avgPwCurve+=[sum(samp.fastPWind[i*self.subperiods:(i+1)*self.subperiods])/self.subperiods for i in range(self.T)]
             avgPwCurve/=Nsamples
-            avgDaySample.Pwind_kw=np.round(avgPwCurve,0)
+            avgDaySample['Pwind_kw']=np.round(avgPwCurve,0)
         return avgDaySample # E[xi]
     
     def updateNominaltoSampleSetMean(self,DaySamplesSet):
@@ -1166,24 +1411,24 @@ class EDnR(genericStochasticProgram):
         self.logger.debug(f"previous nominal Day: {nominalScenario}")
             
         meanScenario=self.GetExpectedFromSampleSet(DaySamplesSet)
-        self.logger.debug(f"expected, new nominal Day: {meanScenario}")
         
         # update nominal demand 
         # I SHOULDNT UPDATE PEAK ONLY THE CURVE
         # self.peak_demand_kw=max(meanScenario.demand_curve_kw)
-        self.demand_curve_kw=deepcopy(meanScenario.demand_curve_kw) #need, idk why but sure, maybe to ensure deletion
-        # self.demand_curve_pu=self.demand_curve_kw/self.peak_demand_kw
+        # need the deepcopy, to ensure deletion of meanScenario (i think)
+        self.demand_curve_kw=deepcopy(meanScenario['demand_curve_kw']) 
         self.demand_curve_pu=self.demand_curve_kw/self.peak_demand_kw
 
+        self.logger.debug(f"expected, new nominal Day: {meanScenario}")
 
         ## update solar nominal gen curve
         if self.solarMPPTavailable: 
             g=self.MG.Gens[self.idx_solarMPPT]
-            g.gen_curve_pu=meanScenario.Psolar_kw/g.power_kw
+            g.gen_curve_pu=meanScenario['Psolar_kw']/g.power_kw
         ## update wind nominal gen curve
         if self.windMPPTavailable:
             g=self.MG.Gens[self.idx_windMPPT]
-            g.gen_curve_pu=meanScenario.Pwind_kw/g.power_kw
+            g.gen_curve_pu=meanScenario['Pwind_kw']/g.power_kw
         del nominalScenario,meanScenario
 
         # Get Xihat scenarios from sample set, considering E[Xi]=0
@@ -1221,14 +1466,14 @@ class EDnR(genericStochasticProgram):
         return Ximax,Ximin
  
     def heuristic_reserve(self,customReserve=None,customReg=None,peakSupportedDisconn=0.3,
-                          f_hi=62,f_low=58.5,fpart_bess=0.4,Type3GenFactor=0.5,
+                          f_hi=62,f_low=58.5,fpart_bess=None,Type3GenFactor=0.5,
                         Res_verbose=False,T_RB_dc_h=2,T_RB_ch_h=2,**kwargs):
         """Solve deterministic EDnR. Returns Reserve decision object
         with {fpart,ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,Rcost}.
         
         **R kwargs:**
             customReserve=None,customReg=None,peakSupportedDisconn=0.4,f_hi=62,f_low=58.5,
-            fpart_bess=0.6,Type3GenFactor=0.5,
+            fpart_bess=None,Type3GenFactor=0.5,
             Res_verbose=False,T_RB_dc_h=0.5,T_RB_ch_h=0.5
         
         **ED kwargs:**
@@ -1240,7 +1485,7 @@ class EDnR(genericStochasticProgram):
             # Carga mas grande desconectable, asumiendo un % de peak demand
             ResdownTotal=peakSupportedDisconn*self.peak_demand_kw
             # Capacidad mas grande de unidad de generacion (N-1)
-            ResupTotal=max([max(g.power_perunit_kw) for g in self.MG.Gens])
+            ResupTotal=max([max(g.power_perunit_kw) for g in self.MG.Gens]+[peakSupportedDisconn*self.peak_demand_kw])
         elif isinstance(customReserve,dict):
             # A menos que se estipule lo contrario
             ResupTotal=customReserve['up']
@@ -1253,14 +1498,19 @@ class EDnR(genericStochasticProgram):
         # 2. Elegir la constante de regulacion menor (mas robusto)
         R_MG_max=min(R_MGup,R_MGlo) #Hz/kW'
         if Res_verbose:
-            if (self.logger.level>logging.INFO):
+            if (self.logger.level>logging.WARNING):
                 self.logger.critical("logging level too high, Reserve info not shown")
-            self.logger.info(f"Total Rsrv: +{ResupTotal/1000:.2f}MW, -{ResdownTotal/1000:.2f}MW")
-            self.logger.info(f"Freq Limits: {f_low-60}Hz, {f_hi-60}Hz, ")
-            self.logger.info(f"R_MG: {R_MG_max*1000:.2f}Hz/MW, {R_MG_max*self.peak_demand_kw/60:.3%} puHz/puMW")
+            self.logger.warning(f"Total Rsrv: +{ResupTotal/1000:.2f}MW, -{ResdownTotal/1000:.2f}MW")
+            self.logger.warning(f"Freq Limits: {f_low-60}Hz, {f_hi-60}Hz, ")
+            self.logger.warning(f"R_MG: {R_MG_max*1000:.2f}Hz/MW, {R_MG_max*self.peak_demand_kw/60:.3%} puHz/puMW")
         # 3. Definir factores de participacion, constantes de regulacion y holguras
         fpart=[0]*(self.Ngen+self.HAS_BESS) # % 
         R=[0]*(self.Ngen+self.HAS_BESS) # Hz/kW
+
+        if self.HAS_BESS and fpart_bess is None:
+            # idk a very ad hoc rule of thumb
+            fpart_bess=np.round(min(max((self.CE_bess_kwh/(self.peak_demand_kw*3.5))+0.1,0.1),0.5),2)
+            self.logger.warning(f"fpart_bess not given; set to: {fpart_bess:.1%}")
         while True: 
             retry=False
             # 3.1. Definir fpart y ctes de Reg
@@ -1288,7 +1538,7 @@ class EDnR(genericStochasticProgram):
                 CapTotDispatch=sum(g.power_kw for g in self.MG.Gens if g.dispatchable)
                 r=R_MG_remaining*CapTotDispatch/60 # igual para todos, en puHz/pukW
                 if Res_verbose:
-                    self.logger.info(f"Equal droops r: {r:.2%} puHz/puMW")
+                    self.logger.warning(f"Equal droops r: {r:.2%} puHz/puMW")
                 # 3.1.b.2. Si hay intermitentes no despachables (Tipo 2 o MPPT) asignarles r->+inf puHz/pukW
                 rTipo3=1000 # aka no participan en regulacion
                 R[:self.Ngen]=[r*60/g.power_kw if g.dispatchable else rTipo3*60/g.power_kw for g in self.MG.Gens] # Hz/kW
@@ -1297,7 +1547,7 @@ class EDnR(genericStochasticProgram):
                 if sum(g.intermittent and g.dispatchable for g in self.MG.Gens)>0:
                 # 3.1.b.4. Si hay despachables intermitentes (Tipo 3) ...
                     if Res_verbose:
-                        self.logger.info(f"Rescaling by {Type3GenFactor:.2f} for Type 3")
+                        self.logger.warning(f"Rescaling by {Type3GenFactor:.2f} for Type 3")
                     # ... se reducen su fpart_i  por (Type3GenFactor, e.g. 0.5) w.r.t. Tipo 1...
                     fpart[:self.Ngen]=[Type3GenFactor*f if self.MG.Gens[i].intermittent else f for i,f in enumerate(fpart[:self.Ngen])]
                     s=sum(f for f in fpart[:self.Ngen])# suma (de los non-bess)
@@ -1317,7 +1567,6 @@ class EDnR(genericStochasticProgram):
                 p_ch_max_bess_kw=max(self.p_ch_max_bess_kw-H_n[-1],0)
                 if (0 in {p_dc_max_bess_kw , p_ch_max_bess_kw}):
                     self.logger.critical(f"Batt cannot charge and/or discharge!: Pdc <= {p_dc_max_bess_kw:.0f}kW, Pch <= {p_ch_max_bess_kw:.0f}kW.")
-                    # raise Exception("Battery bounds too strict")\
                     retry=True
 
                 # 3.4. Se calculan Cotas de SOE
@@ -1327,7 +1576,10 @@ class EDnR(genericStochasticProgram):
                 maxSOE_perc=max(1-T_RB_ch_h*H_n[-1]/self.CE_bess_kwh,0)
                 if(minSOE_perc>=maxSOE_perc):
                     self.logger.critical(f"Batt SOE bounds infeasible: {minSOE_perc:.1%} <= SOE <= {maxSOE_perc:.1%}.")
-                    # raise Exception("Battery bounds too strict")
+                    retry=True
+
+                if(not self.strictlycircularbess and maxSOE_perc<=self.BESS_SOE_init):
+                    self.logger.critical(f"Max SOE {maxSOE_perc:.1%} is lower than SOE init {self.BESS_SOE_init:.1%}.")
                     retry=True
                 
             # 3.5. Si asignacion de BESS es infactible, intentar de nuevo...
@@ -1335,10 +1587,14 @@ class EDnR(genericStochasticProgram):
                 if customReg is not None:
                     raise Exception("Custom Regulation forced unfeasible BESS bounds")
                 fpart_bess=fpart_bess*0.8 #...con menor participation del BESS
-                self.logger.info(f"Retrying with lower fpart_bess={fpart_bess:.1%}")
+                self.logger.critical(f"Retrying with lower fpart_bess={fpart_bess:.1%}")
                 continue
             # makeshift do-while
             else:
+                self.customReserve={"up":ResupTotal,"down":ResdownTotal}
+                self.fpart_bess = fpart_bess
+                self.T_RB_ch_h = T_RB_ch_h
+                self.T_RB_dc_h = T_RB_dc_h
                 break
 
         # 4. Se recalculan las constantes de regulacion finales
@@ -1357,22 +1613,22 @@ class EDnR(genericStochasticProgram):
                     'p_ch_max_bess_kw':p_ch_max_bess_kw,
                     'minSOE_perc':minSOE_perc,
                     'maxSOE_perc':maxSOE_perc}
-            self.logger.info(f"{minSOE_perc:.2%} <= SOE <= {maxSOE_perc:.2%}")
+            self.logger.warning(f"{minSOE_perc:.2%} <= SOE <= {maxSOE_perc:.2%}")
                     
         if Res_verbose:
-            self.logger.info(f"For {[g.type for g in self.MG.Gens]+self.HAS_BESS*["BESS"]}")
-            self.logger.info(f"fpart: [{", ".join([f"{f:.1%}" for f in fpart])}]")
-            self.logger.info(f"R: [{", ".join(f"{r:.1%}" for r in R_pu)}]% puHz/puMW")
-            self.logger.info(f"R: [{", ".join(f"{r:.1f}" for r in R_HzMw)}] Hz/MW")
-            self.logger.info(f"H+: {H_p}kW")
-            self.logger.info(f"H-: {H_n}kW")
-            self.logger.info(f"ResTotal: +{ResupTotal}kW,-{ResdownTotal}kW")
+            self.logger.warning(f"For {[g.type for g in self.MG.Gens]+self.HAS_BESS*["BESS"]}")
+            self.logger.warning(f"fpart: [{", ".join([f"{f:.1%}" for f in fpart])}]")
+            self.logger.warning(f"R: [{", ".join(f"{r:.1%}" for r in R_pu)}]% puHz/puMW")
+            self.logger.warning(f"R: [{", ".join(f"{r:.1f}" for r in R_HzMw)}] Hz/MW")
+            self.logger.warning(f"H+: {H_p}kW")
+            self.logger.warning(f"H-: {H_n}kW")
+            self.logger.warning(f"ResTotal: +{ResupTotal}kW,-{ResdownTotal}kW")
             if Res_verbose>1:
-                self.logger.debug(f"params passed to BaseED: {paramsForED}")
+                self.logger.warning(f"params passed to BaseED: {paramsForED}")
             
 
         ##### fpart,ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n        
-        ReserveResult=types.SimpleNamespace()
+        ReserveResult=SimpleNamespace()
         ReserveResult.fpart=np.array(fpart)
         ReserveResult.ResT_p=ResupTotal
         ReserveResult.ResT_n=ResdownTotal
@@ -1382,8 +1638,14 @@ class EDnR(genericStochasticProgram):
         ReserveResult.H_n=H_n
         return paramsForED,ReserveResult
  
-    def plotED(self,EDResult,EDplotstyle='stack',stackalpha=0.7,**kwargs):
+    def plotED(self,EDResult,plot_R=False,plotcolors=None,EDplotstyle='stack',stackalpha=0.7,**kwargs):
+        # self.logger.debug(f"Result passed:{EDResult}")
         # Graficar demanda y generacion
+        if plotcolors is not None:
+            assert plotcolors in mpl.colormaps(), f"plotcolors must be a matplotlib.colormaps. Available: {mpl.colormaps()}"
+            self.plotcolors=mpl.colormaps[plotcolors].colors
+        else:    
+            self.plotcolors=mpl.colormaps['Set1'].colors
         genlabels=self.gennames 
         T=self.T
         if self.HAS_BESS:
@@ -1476,294 +1738,279 @@ class EDnR(genericStochasticProgram):
                 frameon=True)
 
         ax0.text(0.02, 0.08,f"Promedio: ${cop_kwh_avg:,.0f} COP/kWh",transform=ax0.transAxes,fontsize=10,color='black',bbox=dict(facecolor='lightgray', alpha=0.8, edgecolor='none'))
-        edrc=EDResult.EDnRcost if hasattr(EDResult,'EDnRcost') else EDResult.EDcost
-        ax0.text(0.02, 0.04,f"Costo Diario: ${edrc:,.0f} COP",transform=ax0.transAxes,fontsize=10,color='black',bbox=dict(facecolor='lightgray', alpha=0.8, edgecolor='none'))
+        just_ED_no_R = not hasattr(EDResult,'fpart')
+        cost_of_ed=EDResult.EDcost if just_ED_no_R else EDResult.EDnRcost
+        ax0.text(0.02, 0.04,f"Costo Diario [ED{"" if just_ED_no_R else "+R"}]: ${cost_of_ed:,.0f} COP",transform=ax0.transAxes,fontsize=10,color='black',bbox=dict(facecolor='lightgray', alpha=0.8, edgecolor='none'))
         
         # plt.title("Despacho acumulado con costo/demanda")
         fig.set_dpi(500)
         plt.tight_layout()
         plt.show()
-    
-    # def plotRes(self,EDResult,**kwargs):
-                
+
+        if plot_R and not just_ED_no_R:
+            self.plotR(EDResult,stackalpha=stackalpha)
+
+    def plotR(self,EDresult,stackalpha):
+
+        genlabels=self.gennames 
+        T=self.T
+        if self.HAS_BESS:
+            genlabels+=['BESS']
+
+        Hp=EDresult.H_p
+        Hn=EDresult.H_n
+        RTp=EDresult.ResT_p
+        RTn=EDresult.ResT_n
+        if len(Hp.shape)==1 or len(Hn.shape)==1:
+            #in case detED
+            Hp=np.tile(Hp,(T,1)).T
+            Hn=np.tile(Hn,(T,1)).T
+            RTp=np.tile(RTp,T)
+            RTn=np.tile(RTn,T)
+
+        periods = np.arange(0, 24+1/T, 24/T)
+        fig, ax = plt.subplots(figsize=(14,8))
+        ax.stackplot(periods,np.concatenate((Hp,np.array([Hp[:,-1]]).T),axis=1),labels=genlabels, alpha=stackalpha,step='post',colors=self.plotcolors)
+        ax.stackplot(periods,-np.concatenate((Hn,np.array([Hn[:,-1]]).T),axis=1), alpha=stackalpha,step='post',colors=self.plotcolors)
+        
+        ax.step(periods,np.append(RTp,RTp[-1]),color="teal",linestyle='--',label=r"$R^+_T$",where='post')
+        ax.step(periods,-np.append(RTn,RTn[-1]),color="teal",linestyle='--',label=r"$R^-_T$",where='post')
+
+        ax.axhline(0,color='black',lw=1)
+        ax.set_xticks(periods)
+        ax.set_xlim((0,T-1))
+        ax.set_xlabel('Tiempo (h)')
+        ax.set_ylabel("Holgura (kW)")
+        fig.legend(loc='upper left',bbox_to_anchor=(0.07,0.97),frameon=True)
+        fig.set_dpi(500)
+        plt.tight_layout()
+        plt.show()
     
 class detEDnR(EDnR):
-        def __init__(self,MG:MG,subperiods:int=30,strictlycircularbess:bool=True,BESS_SOE_init=0.0,
-                 plotcolors=None,seed=None,
-                 grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,**kwargs):
-            
-            super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,
-                             plotcolors,seed,grb_verbose,logger_scope,logger_level,**kwargs)
-
-        def solve(self,TrainSampleSet=None,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,reservecost_wrt_gencost=0.4,**kwargs):
-            """Solve deterministic EDnR. Does heuristic_reserve() then BaseDetED(), but
-            takes an input training sample set to calculate avg/exp day, to be used as nominal day,
-            **updating instance parameters (demand and Type 3 generation).**
-            Returns decision x_dec=EDnRresult object with {Pgen[GxT],PBESS[T],SOE[T],fpart,
-            ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,EDcost,Rcost}, and in-sample performance Jis=ED+R cost [D-1].
-                     
-            **R kwargs:**
-                customReserve=None,customReg=None,peakSupportedDisconn=0.4,f_hi=62,f_low=58.5,
-                reservecost_wrt_gencost=0.4,fpart_bess=0.6,Type3GenFactor=0.5,
-                Res_verbose=False,T_RB_dc_h=0.5,T_RB_ch_h=0.5
-            
-            **ED kwargs:**
-                plot_ED=False,EDplotstyle='stack',stackalpha=0.7,grb_verbose=None,BESS_SOE_init=None
-            """
-
-            if TrainSampleSet is not None:
-                # Update nominal day with expected from sample set
-                self.updateNominaltoSampleSetMean(TrainSampleSet)
-            
-            # Realizar heuristica de reserva y obtener cotas de generacion
-            EDparams,ReserveResult=self.heuristic_reserve(**kwargs)
-            # Save for resolve()
-            self.ReserveResult=ReserveResult
-            # Calcular costo de reserva como fraccion del costo de generacion
-            c_gen_copkwh_w_bess=self.c_gen_copkwh
-            if self.HAS_BESS: c_gen_copkwh_w_bess=np.append(c_gen_copkwh_w_bess,self.c_chdc_copkwh)    
-            ReserveResult.Rcost=reservecost_wrt_gencost*np.sum((ReserveResult.H_p+ReserveResult.H_n)*c_gen_copkwh_w_bess)
-            
-            # Realizar ED con cotas definidas y obtener costos (D-1) de Despacho y Reserva
-            EDResult=self.detED(EDparams,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs)
-
-            # Combinar resultados de ED + R
-            x_dec=types.SimpleNamespace(**EDResult.__dict__,**ReserveResult.__dict__)                 
-            x_dec.EDnRcost=x_dec.EDcost+x_dec.Rcost
-            if plot_ED:
-                self.plotED(x_dec,**kwargs)   
-            J_is=x_dec.EDnRcost
-            return x_dec,J_is
+    def __init__(self,MG:MG,subperiods:int=30,strictlycircularbess:bool=True,BESS_SOE_init=0.0,
+                plotcolors=None,seed=None,
+                grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,**kwargs):
         
-        # def resolve(self,trainSampleSet=None,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
-        #     if not self.hasBeenSolved:
-        #         raise Exception("Instance must be solved once with solve() before resolve() can be called") 
-         
-        #     # New average day from sample set
-        #     if trainSampleSet is not None:
-        #         self.logger.debug("updating nominal rnwgen,demand with trainSampleSet passed to resolve()")
-        #         self.updateNominaltoSampleSetMean(trainSampleSet)
-       
-        #         # Reset Pmax constraint with new nominal gen
-        #         # Yes, sample set bounds Pmax of Type2/MPPT gens P_ED, any excess generated after PED is accounted for in Operation
-        #         self.pmaxCtrt.RHS=np.vstack([np.array(g.gen_curve_pu)*g.power_kw for g in self.MG.Gens])
-                
-        #         # Reset balance constraint RHS with new nominal demand curve
-        #         self.loadbalanceCtrt.RHS=self.demand_curve_kw 
-       
-        #     if None not in {lambdas_C,lambdas_V,z_PC,z_PV}:
-        #         self.logger.debug("updating z and lambda values (RHS) with ADMM parameters passed to resolve()")
-        #         if not self.transactive:
-        #             raise Exception("Instance not set for transactive EDnR, cannot pass ADMM parameters. Recreate.")
-        #         if self.neighborhs==[]:
-        #             raise Exception("Instance has no neighbors, cannot pass ADMM parameters")
-        #         if not (len(lambdas_C)==self.lenneighbors and len(lambdas_V)==self.lenneighbors and len(z_PC)==self.lenneighbors and len(z_PV)==self.lenneighbors):
-        #             raise Exception("ADMM parameter lists must have same length as number of neighbors")
-                
-        #         self.z_PC_k=z_PC
-        #         self.z_PV_k=z_PV
-        #         self.lam_C_k=lambdas_C
-        #         self.lam_V_k=lambdas_V
-        #         # Update ADMM parameters RHSs
-        #         self.z_PC_ctrt.RHS=self.z_PC_k
-        #         self.z_PV_ctrt.RHS=self.z_PV_k
-        #         self.lam_C_ctrt.RHS=self.lam_C_k
-        #         self.lam_V_ctrt.RHS=self.lam_V_k
+        super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,
+                            plotcolors,seed,grb_verbose,logger_scope,logger_level,LastInstance,model_name,**kwargs)
 
-        #     # Resolve Model
-        #     self.logger.debug("solving...")
-        #     self.M.optimize()
-        #     self.sol_time.append(self.M.Runtime)
-        #     if self.M.status==GRB.OPTIMAL:
-        #         self.logger.debug(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
-        #     else:
-        #         logging.warning(f"ED not solved optimally. Status: {self.M.status}")
-        #         try:
-        #             self.M.computeIIS()
-        #             self.M.write(f"model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
-        #             logging.warning("Irreducible Inconsistent Subsystem written to model.ilp")
-        #         except gp.GurobiError as e:
-        #             logging.error(f"Error reported when computing IIS: {e}")
-        #     # Get Result Data
-        #     pG_res=self.pG.X
-        #     # Build Result Object
-        #     detEDresult=types.SimpleNamespace()
-        #     # Pgen[GxT],PBESS[T],SOE[T],EDcost
-        #     detEDresult.Pgen=pG_res
-        #     detEDresult.EDcost=self.M.ObjVal # == np.sum(cop_hr)
-        #     if self.transactive:
-        #         detEDresult.P_C=self.P_C.X
-        #         detEDresult.P_V=self.P_V.X
-            
-        #     if self.HAS_BESS:
-        #         pCH_res=self.pCH.X
-        #         pDC_res=self.pDC.X
-        #         SOE_res=self.SOE.X
-        #         detEDresult.PDC=pCH_res
-        #         detEDresult.PCH=pDC_res
-        #         detEDresult.PBESS=pDC_res-pCH_res
-        #         detEDresult.SOE=SOE_res
-
-        #         for t in range(self.T):
-        #             if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-        #                 self.logger.critical(f"t={t}")
-        #                 self.logger.critical(f"pCH_res: {pCH_res[:t+1]}")
-        #                 self.logger.critical(f"pDC_res: {pDC_res[:t+1]}")
-        #                 self.logger.critical(f"SOE_res: {SOE_res[:t+1]}")
-        #                 raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
-                
-        #     # Combine ED + R results, return new solution
-        #     x_dec=types.SimpleNamespace(**detEDresult.__dict__,**self.ReserveResult.__dict__)   
-        #     x_dec.EDnRcost=x_dec.EDcost+x_dec.Rcost
-        #     if plot_ED:
-        #         self.plotED(x_dec,**kwargs)   
-        #     J_is=x_dec.EDnRcost
-        #     return x_dec,J_is #x_dec,Jis
+    def solve(self,TrainSampleSet=None,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,reservecost_wrt_gencost=0.4,**kwargs):
+        """Solve deterministic EDnR. Does heuristic_reserve() then BaseDetED(), but
+        takes an input training sample set to calculate avg/exp day, to be used as nominal day,
+        **updating instance parameters (demand and Type 3 generation).**
+        Returns decision x_dec=EDnRresult object with {Pgen[GxT],PBESS[T],SOE[T],fpart,
+        ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,EDcost,Rcost}, and in-sample performance Jis=ED+R cost [D-1].
+                    
+        **R kwargs:**
+            customReserve=None,customReg=None,peakSupportedDisconn=0.4,f_hi=62,f_low=58.5,
+            reservecost_wrt_gencost=0.4,fpart_bess=0.6,Type3GenFactor=0.5,
+            Res_verbose=False,T_RB_dc_h=0.5,T_RB_ch_h=0.5
         
-        def detED(self,params={},lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
-            """Meant to be called after heuristic_reserve(). Solves deterministic ED with params (can be {}) and
-            instance creation parameters. Returns object with {Pgen[GxT],PBESS[
-                T],SOE[T],EDcost}."""
-            T=self.T
-            pG=self.pG
-            M=self.M
-            # Overwrites __init__ self.grb_verbose
-            if grb_verbose is not None: self.grb_verbose=grb_verbose
-            M.params.LogToConsole=self.grb_verbose
-            # Overwrites __init__ self.BESS_SOE_init
-            if BESS_SOE_init is not None: self.BESS_SOE_init=BESS_SOE_init
+        **ED kwargs:**
+            plot_ED=False,EDplotstyle='stack',stackalpha=0.7,grb_verbose=None,BESS_SOE_init=None
+        """
+        self.reservecost_wrt_gencost=reservecost_wrt_gencost
+        if TrainSampleSet is not None:
+            # Update nominal day with expected from sample set
+            self.updateNominaltoSampleSetMean(TrainSampleSet)
+        
+        # Realizar heuristica de reserva y obtener cotas de generacion
+        EDparams,ReserveResult=self.heuristic_reserve(**kwargs)
+        self.logger.debug(f"edparams: {EDparams}")
+        # Guardar para que resolve() sepa si es det
+        self.ReserveResult=ReserveResult
+        # Calcular costo de R segun heuristica
+        c_gen_copkwh_w_bess=self.c_gen_copkwh
+        if self.HAS_BESS: c_gen_copkwh_w_bess=np.append(c_gen_copkwh_w_bess,self.c_chdc_copkwh)   
+        ReserveResult.Rcost=reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(ReserveResult.H_p+ReserveResult.H_n))*self.T
+        
+        # Realizar ED con cotas definidas y obtener costos (D-1) de Despacho y Reserva
+        EDResult=self.detED(EDparams,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs)
+        if EDResult==-1: return None,-1
+
+        # Combinar resultados de ED + R
+        x_dec=SimpleNamespace(**EDResult.__dict__,**ReserveResult.__dict__)                 
+        x_dec.EDnRcost=x_dec.EDcost+x_dec.Rcost
+        if plot_ED:
+            self.plotED(x_dec,**kwargs)   
+        J_is=x_dec.EDnRcost
+        return x_dec,J_is
+    
+    def detED(self,params={},lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
+        """Meant to be called after heuristic_reserve(). Solves deterministic ED with params (can be {}) and
+        instance creation parameters. Returns object with {Pgen[GxT],PBESS[
+            T],SOE[T],EDcost}."""
+        T=self.T
+        pG=self.pG
+        M=self.M
+        # Overwrites __init__ self.grb_verbose
+        if grb_verbose is not None: self.grb_verbose=grb_verbose
+        M.params.LogToConsole=self.grb_verbose
+        # Overwrites __init__ self.BESS_SOE_init
+        if BESS_SOE_init is not None: self.BESS_SOE_init=BESS_SOE_init
+        # Parse params
+        p_gmax_kw_mtx=params.get('p_gmax_kw_mtx',np.vstack([np.array(g.gen_curve_pu)*g.power_kw for g in self.MG.Gens]))
+        p_gmin_kw_mtx=params.get('p_gmin_kw_mtx',np.vstack([np.zeros(T) for _ in self.MG.Gens]))
+        ### GENERATOR CONSTRAINTS
+        self.pmaxCtrt=M.addConstr(pG<=p_gmax_kw_mtx,"pmax")
+        pmin=M.addConstrs((pG[:,i]>=p_gmin_kw_mtx[:,i] for i in range(T)),"pmin")
+        upramp=M.addConstrs((pG[:,i+1]-pG[:,i]<=self.UR_kwhr for i in range(T-1)),"upramp")
+        upramp_last=M.addConstr(pG[:,0]-pG[:,T-1]<=self.UR_kwhr,"upramp_last")
+        downramp=M.addConstrs((pG[:,i+1]-pG[:,i]>=-self.DR_kwhr for i in range(T-1)),"downramp")
+        downramp_last=M.addConstr(pG[:,0]-pG[:,T-1]>=-self.DR_kwhr,"downramp_last")    
+                    
+        GenBal=gp.GenExpr()
+        GenBal=pG.sum(axis=0)
+    
+        # BESS VARIABLES AND CONSTRAINTS
+        if self.HAS_BESS:
             # Parse params
-            p_gmax_kw_mtx=params.get('p_gmax_kw_mtx',np.vstack([np.array(g.gen_curve_pu)*g.power_kw for g in self.MG.Gens]))
-            p_gmin_kw_mtx=params.get('p_gmin_kw_mtx',np.vstack([np.zeros(T) for _ in self.MG.Gens]))
-            ### GENERATOR CONSTRAINTS
-            self.pmaxCtrt=M.addConstr(pG<=p_gmax_kw_mtx,"pmax")
-            pmin=M.addConstrs((pG[:,i]>=p_gmin_kw_mtx[:,i] for i in range(T)),"pmin")
-            upramp=M.addConstrs((pG[:,i+1]-pG[:,i]<=self.UR_kwhr for i in range(T-1)),"upramp")
-            upramp_last=M.addConstr(pG[:,0]-pG[:,T-1]<=self.UR_kwhr,"upramp_last")
-            downramp=M.addConstrs((pG[:,i+1]-pG[:,i]>=-self.DR_kwhr for i in range(T-1)),"downramp")
-            downramp_last=M.addConstr(pG[:,0]-pG[:,T-1]>=-self.DR_kwhr,"downramp_last")    
+            minSOE_perc=params.get('minSOE_perc',0)
+            maxSOE_perc=params.get('maxSOE_perc',1)
+            p_ch_max_bess_kw=params.get('p_ch_max_bess_kw',self.p_ch_max_bess_kw)
+            p_dc_max_bess_kw=params.get('p_dc_max_bess_kw',self.p_dc_max_bess_kw)
+            # Add BESS Vars
+            pCH=M.addMVar(shape=(T),lb=0,ub=p_ch_max_bess_kw)
+            pDC=M.addMVar(shape=(T),lb=0,ub=p_dc_max_bess_kw)
+            SOE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
+            # Add BESS [cRT*pDC] TO OBJECTIVE FUNCTION
+            for t in range(T):
+                self.fobj+=self.c_chdc_copkwh*(pDC[t]+1/10*pCH[t]) # 1/20 is to slightly penalize charging
+            # Add BESS Constraints
+            sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(p_ch_max_bess_kw,p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
+            SOEdynamics=M.addConstrs((SOE[t+1]==SOE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
+            if self.strictlycircularbess:
+                SOEcircular=M.addConstr(SOE[0]==SOE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
+            else:    
+                SOEstartcond=M.addConstr(SOE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
+                SOEendcond=M.addConstr(SOE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
+                etacutplane=(self.eta_ch+1/self.eta_dc)/2
+                SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
+            # make var/ctrt handlers accessible as attributes   
+            self.pCH=pCH
+            self.pDC=pDC
+            self.SOE=SOE   
+            GenBal+=pDC-pCH 
                         
-            GenBal=gp.GenExpr()
-            GenBal=pG.sum(axis=0)
-        
-            # BESS VARIABLES AND CONSTRAINTS
-            if self.HAS_BESS:
-                # Parse params
-                minSOE_perc=params.get('minSOE_perc',0)
-                maxSOE_perc=params.get('maxSOE_perc',1)
-                p_ch_max_bess_kw=params.get('p_ch_max_bess_kw',self.p_ch_max_bess_kw)
-                p_dc_max_bess_kw=params.get('p_dc_max_bess_kw',self.p_dc_max_bess_kw)
-                # Add BESS Vars
-                pCH=M.addMVar(shape=(T),lb=0,ub=p_ch_max_bess_kw)
-                pDC=M.addMVar(shape=(T),lb=0,ub=p_dc_max_bess_kw)
-                SOE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
-                # Add BESS [cRT*pDC] TO OBJECTIVE FUNCTION
-                for t in range(T):
-                    self.fobj+=self.c_chdc_copkwh*(pDC[t]+1/10*pCH[t]) # 1/20 is to slightly penalize charging
-                # Add BESS Constraints
-                sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(p_ch_max_bess_kw,p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
-                SOEdynamics=M.addConstrs((SOE[t+1]==SOE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
-                if self.strictlycircularbess:
-                    SOEcircular=M.addConstr(SOE[0]==SOE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
-                else:    
-                    SOEstartcond=M.addConstr(SOE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
-                    SOEendcond=M.addConstr(SOE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
-                    etacutplane=(self.eta_ch+1/self.eta_dc)/2
-                    SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
-                # make var/ctrt handlers accessible as attributes   
-                self.pCH=pCH
-                self.pDC=pDC
-                self.SOE=SOE   
-                GenBal+=pDC-pCH 
-                          
-            # FOR ADMM MODE, THE RESOLVE WRAPPER UPDATES RHS of z_PV_ctrt, z_PC_ctrt, lam_C_ctrt, lam_V_ctrt
-            if self.transactive:
-                if self.neighborhs==[]:
-                    raise Exception("transactive EDnR requires neighbors list")
-                else:
-                    if z_PC is not None: self.z_PC_k=z_PC
-                    if z_PV is not None: self.z_PV_k=z_PV
-                    if lambdas_C is not None: self.lam_C_k=lambdas_C
-                    if lambdas_V is not None: self.lam_V_k=lambdas_V
-                    # Add P compras and P ventas variables to model
-                    P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=np.zeros((self.lenneighbors,T)),ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
-                    P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=np.zeros((self.lenneighbors,T)),ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
-                    
-                    # Add ADMM params as variables == constant RHS to update in resolve()
-                    z_PC_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
-                    z_PV_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
-                    self.z_PC_ctrt=M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
-                    self.z_PV_ctrt=M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
-                    
-                    lam_C_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_C") # lambda compras
-                    lam_V_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_V") # lambda ventas   
-                    self.lam_C_ctrt=M.addConstr(lam_C_var==self.lam_C_k,"lam_C_const")
-                    self.lam_V_ctrt=M.addConstr(lam_V_var==self.lam_V_k,"lam_V_const")
-                    
-                for t in range(T):
-                    for j in range(self.lenneighbors): #list of MG indices
-                        ### METER INTERCAMBIOS EN FUNCION OBJETIVO
-                        self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C[j,t]-lam_C_var[j,t]*P_V[j,t]
-                        self.fobj+=(self.rho/2)*((P_C[j,t]-z_PC_var[j,t])*(P_C[j,t]-z_PC_var[j,t])+(P_V[j,t]-z_PV_var[j,t])*(P_V[j,t]-z_PV_var[j,t]))
-                self.P_C=P_C
-                self.P_V=P_V
-                ### METER INTERCAMBIOS EN BALANCE DE CARGA
-                GenBal+=P_C.sum(axis=0)-P_V.sum(axis=0)
-            
-            ### LOAD BALANCE CONSTRAINT
-            self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
-                     
-            M.setObjective(self.fobj, GRB.MINIMIZE)
-            self.logger.debug("solving...")
-            M.optimize()
-            self.hasBeenSolved=True
-            self.sol_time.append(M.Runtime)
-            if M.status==GRB.OPTIMAL:
-                self.logger.debug(f"ED solved optimally in {M.Runtime:.2f} seconds")
+        # FOR ADMM MODE, THE RESOLVE WRAPPER UPDATES RHS of z_PV_ctrt, z_PC_ctrt, lam_C_ctrt, lam_V_ctrt
+        if self.transactive:
+            if self.neighbors==[]:
+                raise Exception("transactive EDnR requires neighbors list")
             else:
-                logging.warning(f"ED not solved optimally. Status: {M.status}")
-                try:
-                    M.computeIIS()
-                    M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
-                    logging.warning("Irreducible Inconsistent Subsystem written to model.ilp")
-                except gp.GurobiError as e:
-                    logging.error(f"Error reported when computing IIS: {e}")
-            # Get Result Data
-            pG_res=pG.X
-            # Build Result Object
-            detEDresult=types.SimpleNamespace()
-            # Pgen[GxT],PBESS[T],SOE[T],EDcost
-            detEDresult.Pgen=pG_res
-            detEDresult.EDcost=M.ObjVal # == np.sum(cop_hr)
-            if self.transactive:
-                detEDresult.P_C=P_C.X
-                detEDresult.P_V=P_V.X
-            
-            if self.HAS_BESS:
-                pCH_res=pCH.X
-                pDC_res=pDC.X
-                SOE_res=SOE.X
-                detEDresult.PDC=pCH_res
-                detEDresult.PCH=pDC_res
-                detEDresult.PBESS=pDC_res-pCH_res
-                detEDresult.SOE=SOE_res
+                # Z AND LAMBDAS MUST BE GIVEN 
+                assert z_PC is not None, f"z_PC is None"
+                assert z_PV is not None, f"z_PV is None"
+                assert lambdas_C is not None, f"lambdas_C is None"
+                assert lambdas_V is not None, f"lambdas_V is None"
+                self.z_PC_k=z_PC
+                self.z_PV_k=z_PV
+                self.lam_C_k=lambdas_C
+                self.lam_V_k=lambdas_V
+                # Add P compras and P ventas variables to model
+                P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=np.zeros((self.lenneighbors,T)),ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
+                P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=np.zeros((self.lenneighbors,T)),ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
+                
+                # Add ADMM params as variables == constant RHS to update in resolve()
+                z_PC_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
+                z_PV_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
+                self.z_PC_ctrt=M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
+                self.z_PV_ctrt=M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
+                
+                lam_C_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_C") # lambda compras
+                lam_V_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_V") # lambda ventas   
+                self.lam_C_ctrt=M.addConstr(lam_C_var==self.lam_C_k,"lam_C_const")
+                self.lam_V_ctrt=M.addConstr(lam_V_var==self.lam_V_k,"lam_V_const")
+                
+            for t in range(T):
+                for j in range(self.lenneighbors): #list of MG indices
+                    ### METER INTERCAMBIOS EN FUNCION OBJETIVO
+                    self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C[j,t]-lam_C_var[j,t]*P_V[j,t]
+                    self.fobj+=(self.rho/2)*((P_C[j,t]-z_PC_var[j,t])*(P_C[j,t]-z_PC_var[j,t])+(P_V[j,t]-z_PV_var[j,t])*(P_V[j,t]-z_PV_var[j,t]))
+            self.P_C=P_C
+            self.P_V=P_V
+            ### METER INTERCAMBIOS EN BALANCE DE CARGA
+            GenBal+=P_C.sum(axis=0)-P_V.sum(axis=0)
+        
+        ### LOAD BALANCE CONSTRAINT
+        self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
+                    
+        M.setObjective(self.fobj, GRB.MINIMIZE)
+        self.logger.debug("solving...")
+        try:
+            M.optimize()
+        except gp.GurobiError as e:
+            self.logger.warning(f"Uhhh something happened: {e}")
+            self.logger.warning(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
+            return -1
+        self.sol_time.append(M.Runtime)
+        if M.status==GRB.OPTIMAL:
+            self.logger.debug(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
+            self.hasBeenSolved=True
+        else:
+            logging.warning(f"ED not solved optimally. Status: {self.M.status}")
+            try:
+                M.computeIIS()
+                M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
+                logging.warning("Irreducible Inconsistent Subsystem written to .ilp")
+                return -1
+            except gp.GurobiError as e:
+                logging.error(f"Error reported when computing IIS: {e}")
+                return -1
 
-                for t in range(T):
-                    if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-                        self.logger.warning(f"t={t}")
-                        self.logger.warning(f"pCH_res: {pCH_res[:t+1]}")
-                        self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
-                        self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
-                        raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
-            
-            return detEDresult
+        # Build Result Object
+        result=SimpleNamespace()
+        result.ObjVal=M.ObjVal
+        result.MPO=self.loadbalanceCtrt.Pi
+        result.Pgen=pG.X
+
+        if self.transactive:
+            result.P_C=P_C.X
+            result.P_V=P_V.X
+        
+        if self.HAS_BESS:
+            pCH_res=pCH.X
+            pDC_res=pDC.X
+            SOE_res=SOE.X
+            result.PCH=pCH_res
+            result.PDC=pDC_res
+            result.PBESS=pDC_res-pCH_res
+            result.SOE=SOE_res
+            for t in range(T):
+                if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
+                    self.logger.warning(f"t={t}")
+                    self.logger.warning(f"pCH_res: {pCH_res[:t+1]}")
+                    self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
+                    self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
+                    raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
+        
+        ## CALCULATE REAL COST OF ED+R [D-1] PLANNING: ED, R, PURCHASES AND SALES
+        Cost_of_ED=0
+        for t in range(T):
+            # P_ED
+            Cost_of_ED+=np.sum(self.c_gen_copkwh*result.Pgen[:,t])
+            # P^DC_ED - only pay BESS per kwh cycled aka discharged, "they" pay for the charge up
+            if self.HAS_BESS:
+                Cost_of_ED+=self.c_chdc_copkwh*pDC_res[t]
+            # buying and selling
+            if self.transactive:
+                for j in (self.lenneighbors):
+                    # if actually buying, add (LAM+lineCost) * P_C
+                    if result.P_C[j,t]>1e-2:
+                        Cost_of_ED+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
+                    # if actually selling, sub LAM * P_V
+                    if result.P_V[j,t]>1e-2:
+                        Cost_of_ED-=self.lam_V_k[j,t]*result.P_V[j,t]        
+        result.EDcost=Cost_of_ED
+        # Si se corre desde solve, se le suma Rcost para obtener EDnRcost
+        return result
         
             
 #ED+R decision taken with SAA 
 class SEDnR(EDnR):
     def __init__(self,MG:MG,subperiods:int=30,strictlycircularbess:bool=True,BESS_SOE_init=0.0,
-                 plotcolors=None,seed=None,grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,**kwargs):
-        super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,plotcolors,seed,grb_verbose,logger_scope,logger_level,**kwargs)
+                 plotcolors=None,seed=None,grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,**kwargs):
+        super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,plotcolors,seed,grb_verbose,logger_scope,logger_level,LastInstance,model_name,**kwargs)
         
     def solve(self,TrainSampleSet,reservecost_wrt_gencost=0.4,Q=100,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
         """Solve Stochastic EDnR. Returns decision x_dec=EDnRresult object with {Pgen[GxT],PBESS[T],SOE[T],fpart,
@@ -1777,6 +2024,7 @@ class SEDnR(EDnR):
         **ED kwargs:**
             plot_ED=False,EDplotstyle='stack',stackalpha=0.7,grb_verbose=None,BESS_SOE_init=None
         """ 
+        self.reservecost_wrt_gencost=reservecost_wrt_gencost
         # Update nominal day with expected from sample set
         self.updateNominaltoSampleSetMean(TrainSampleSet)
                 
@@ -1796,116 +2044,13 @@ class SEDnR(EDnR):
 
         # Llama solve_stochastic con las reservas maximas y los escenarios de variacion
         x_dec=self.solve_stochastic(XiScenarioSet,Ximax,Ximin,SEDnRparams,reservecost_wrt_gencost,Q,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs) ## ED AND R RESULTS
+        if x_dec==-1: return None,-1
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
         # convierte el resultado Jis
         J_is=x_dec.EDnRcost
         return x_dec,J_is
     
-    # def resolve(self,trainSampleSet=None,Q=90,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
-    #     if not self.hasBeenSolved:
-    #         raise Exception("Instance must be solved once with solve() before resolve() can be called") 
-        
-    #     # New average day from sample set
-    #     if trainSampleSet is not None:
-    #         self.logger.debug("updating nominal rnwgen,demand with trainSampleSet passed to resolve()")
-    #         self.updateNominaltoSampleSetMean(trainSampleSet)
-    
-    #         # Reset Pmax constraint with new nominal gen
-    #         self.pmaxCtrt.RHS=np.vstack([np.array(g.gen_curve_pu)*g.power_kw for g in self.MG.Gens])
-            
-    #         # Reset balance constraint RHS with new nominal demand curve
-    #         self.loadbalanceCtrt.RHS=self.demand_curve_kw 
-
-    #         # if new sample set passed
-    #         # Update SAMPLE CTRT RHS
-    #         XiScenarioSet=self.GetVarScenariosFromSampleSet(trainSampleSet)
-    #         self.updateXiScenarioSetVar(XiScenarioSet)
-        
-    #         # Update MAX MIN xi ctrt RHS
-    #         Ximax=np.percentile(XiScenarioSet,float(Q),axis=0)
-    #         Ximin=np.percentile(XiScenarioSet,float(100-Q),axis=0)
-    #         self.ximaxCtrt.RHS=Ximax
-    #         self.ximinCtrt.RHS=Ximin
-            
-    #     if lambdas_C is not None and lambdas_V is not None and z_PC is not None and z_PV is not None:
-    #         self.logger.debug("updating z and lambda values (RHS) with ADMM parameters passed to resolve()")
-    #         if not self.transactive:
-    #             raise Exception("Instance not set for transactive EDnR, cannot pass ADMM parameters")
-    #         if self.neighborhs==[]:
-    #             raise Exception("Instance has no neighbors, cannot pass ADMM parameters")
-    #         if not (len(lambdas_C)==self.lenneighbors and len(lambdas_V)==self.lenneighbors and len(z_PC)==self.lenneighbors and len(z_PV)==self.lenneighbors):
-    #             raise Exception("ADMM parameter lists must have same length as number of neighbors")
-            
-    #         self.z_PC_k=z_PC
-    #         self.z_PV_k=z_PV
-    #         self.lam_C_k=lambdas_C
-    #         self.lam_V_k=lambdas_V
-    #         # Update ADMM parameters RHSs
-    #         self.z_PC_ctrt.RHS=self.z_PC_k
-    #         self.z_PV_ctrt.RHS=self.z_PV_k
-    #         self.lam_C_ctrt.RHS=self.lam_C_k
-    #         self.lam_V_ctrt.RHS=self.lam_V_k
-            
-    #     M=self.M
-    #     self.logger.debug("solving...")
-    #     try:
-    #         M.optimize()
-    #     except gp.GurobiError as e:
-    #         self.logger.warning(f"Uhhh something happened: {e}")
-    #         self.logger.warning(f"{M.NumVars} Vars, {M.NumNZs} Num NZs, {M.NumConstrs} Constraints, {M.NumQConstrs} QConstrts, {M.NumGenConstrs} GenCtrts, {M.NumBinVars} BinVars, {M.NumSOS} SOSCtrts")
-    #         M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
-    #     self.sol_time.append(M.Runtime)
-    #     if M.status==GRB.OPTIMAL:
-    #         self.logger.debug(f"ED solved optimally in {M.Runtime:.2f} seconds")
-    #         self.hasBeenSolved=True
-    #     else:
-    #         logging.warning(f"ED not solved optimally. Status: {M.status}")
-    #         try:
-    #             M.computeIIS()
-    #             M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
-    #             logging.warning("Irreducible Inconsistent Subsystem written to .ilp")
-    #         except gp.GurobiError as e:
-    #             logging.error(f"Error reported when computing IIS: {e}")
-    #     # Get Result Data
-    #     pG_res=self.pG.X
-    #     # Build Result Object
-    #     SEDnRresult=types.SimpleNamespace()
-    #     # Pgen[GxT],PBESS[T],SOE[T],EDcost
-    #     SEDnRresult.Pgen=pG_res
-    #     SEDnRresult.EDnRcost=M.ObjVal
-    #     SEDnRresult.fpart=self.fpart.X
-    #     SEDnRresult.H_p=self.Rp.X
-    #     SEDnRresult.H_n=self.Rn.X
-    #     SEDnRresult.ResT_p=np.sum(self.Rp.X,axis=0)
-    #     SEDnRresult.ResT_n=np.sum(self.Rn.X,axis=0)
-    #     if self.transactive:
-    #         SEDnRresult.P_C=self.P_C.X
-    #         SEDnRresult.P_V=self.P_V.X
-        
-    #     if self.HAS_BESS:
-    #         pCH_res=self.pCH.X
-    #         pDC_res=self.pDC.X
-    #         SOE_res=self.SOE.X
-    #         SEDnRresult.PDC=pCH_res
-    #         SEDnRresult.PCH=pDC_res
-    #         SEDnRresult.PBESS=pDC_res-pCH_res
-    #         SEDnRresult.SOE=SOE_res
-    #         for t in range(self.T):
-    #             if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-    #                 self.logger.warning(f"t={t}")
-    #                 self.logger.warning(f"pCH_res: {pCH_res[:t+1]}")
-    #                 self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
-    #                 self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
-    #                 raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
-    #     if plot_ED:
-    #         self.plotED(SEDnRresult,**kwargs) 
-
-    #     # EDnR results, new solution
-    #     x_dec=SEDnRresult
-    #     J_is=x_dec.EDnRcost
-    #     return x_dec,J_is #x_dec,Jis
-        
     def solve_stochastic(self,XiScenarioSet,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
         """
         Meant to be called by solve(). Solves Stochastic ED (SAA) with params (can be {}) and
@@ -1953,13 +2098,15 @@ class SEDnR(EDnR):
         self.Rn=Rn
         self.fpart=fpart
         
-        self.ximaxCtrt=M.addConstr(ximax_v==Ximax,"ximaxctrt")
+        ## RESERVE CONSTRAINTS
+        self.logger.debug(f"ximin: {Ximin}, ximax={Ximax}")
         self.ximinCtrt=M.addConstr(ximin_v==Ximin,"ximinctrt")
+        self.ximaxCtrt=M.addConstr(ximax_v==Ximax,"ximaxctrt")
         fpartis1=M.addConstrs((fpart[:,t].sum()==1 for t in range(T)),"fpartis1") # sum of participation factors is 1 at each t
         RpandPGenLim=M.addConstrs((p_gmin_kw_mtx[:,t]<=pG[:,t]-Rn[:self.Ngen,t] for t in range(T)),"RpandPGenLim")
         RnandPGenLim=M.addConstrs((pG[:,t]+Rp[:self.Ngen,t]<=p_gmax_kw_mtx[:,t] for t in range(T)),"RnandPGenLim")
-        fpartximax=M.addConstr(-Rn+fpart*Ximax<=np.zeros(((self.Ngen+self.HAS_BESS),T)),"fpartximax")
-        fpartximin=M.addConstr(Rp+fpart*Ximin>=np.zeros(((self.Ngen+self.HAS_BESS),T)),"fpartximin")
+        fpartximax=M.addConstrs((fpart[:,t]*Ximax[t]<=Rn[:,t] for t in range(T)),"fpartximax")
+        fpartximin=M.addConstrs((-fpart[:,t]*Ximin[t]<=Rp[:,t] for t in range(T)),"fpartximin")
         
         # Full costs vector Gens+BESS
         c_gen_copkwh_w_bess=self.c_gen_copkwh
@@ -2017,13 +2164,18 @@ class SEDnR(EDnR):
 
         # FOR ADMM MODE, THE RESOLVE WRAPPER UPDATES RHS of z_PV_ctrt, z_PC_ctrt, lam_C_ctrt, lam_V_ctrt
         if self.transactive:
-            if self.neighborhs==[]:
+            if self.neighbors==[]:
                 raise Exception("transactive EDnR requires neighbors list")
             else:
-                if z_PC is not None: self.z_PC_k=z_PC
-                if z_PV is not None: self.z_PV_k=z_PV
-                if lambdas_C is not None: self.lam_C_k=lambdas_C
-                if lambdas_V is not None: self.lam_V_k=lambdas_V
+                # Z AND LAMBDAS MUST BE SET
+                assert z_PC is not None, f"z_PC is None"
+                assert z_PV is not None, f"z_PV is None"
+                assert lambdas_C is not None, f"lambdas_C is None"
+                assert lambdas_V is not None, f"lambdas_V is None"
+                self.z_PC_k=z_PC
+                self.z_PV_k=z_PV
+                self.lam_C_k=lambdas_C
+                self.lam_V_k=lambdas_V
                 # Add P compras and P ventas variables to model
                 P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
                 P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
@@ -2058,45 +2210,48 @@ class SEDnR(EDnR):
             M.optimize()
         except gp.GurobiError as e:
             self.logger.warning(f"Uhhh something happened: {e}")
-            self.logger.warning(f"{M.NumVars} Vars, {M.NumNZs} Num NZs, {M.NumConstrs} Constraints, {M.NumQConstrs} QConstrts, {M.NumGenConstrs} GenCtrts, {M.NumBinVars} BinVars, {M.NumSOS} SOSCtrts")
-            M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
+            self.logger.warning(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
+            return -1
         self.sol_time.append(M.Runtime)
         if M.status==GRB.OPTIMAL:
-            self.logger.debug(f"ED solved optimally in {M.Runtime:.2f} seconds")
+            self.logger.debug(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
             self.hasBeenSolved=True
         else:
-            logging.warning(f"ED not solved optimally. Status: {M.status}")
+            logging.warning(f"ED not solved optimally. Status: {self.M.status}")
             try:
                 M.computeIIS()
-                M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
+                M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
                 logging.warning("Irreducible Inconsistent Subsystem written to .ilp")
+                return -1
             except gp.GurobiError as e:
                 logging.error(f"Error reported when computing IIS: {e}")
-        # Get Result Data
-        pG_res=pG.X
+                return -1
+
         # Build Result Object
-        SEDnRresult=types.SimpleNamespace()
-        # Pgen[GxT],PBESS[T],SOE[T],EDcost
-        SEDnRresult.Pgen=pG_res
-        SEDnRresult.EDnRcost=M.ObjVal
-        SEDnRresult.fpart=fpart.X
-        SEDnRresult.H_p=Rp.X
-        SEDnRresult.H_n=Rn.X
-        SEDnRresult.ResT_p=np.sum(Rp.X,axis=0)
-        SEDnRresult.ResT_n=np.sum(Rn.X,axis=0)
+        result=SimpleNamespace()
+        result.ObjVal=M.ObjVal
+        result.MPO=self.loadbalanceCtrt.Pi
+
+        result.Pgen=pG.X
+        result.fpart=fpart.X
+        result.H_p=Rp.X
+        result.H_n=Rn.X
+        result.ResT_p=np.sum(Rp.X,axis=0)
+        result.ResT_n=np.sum(Rn.X,axis=0)
+
         if self.transactive:
-            SEDnRresult.P_C=P_C.X
-            SEDnRresult.P_V=P_V.X
+            result.P_C=P_C.X
+            result.P_V=P_V.X
         
         if self.HAS_BESS:
             pCH_res=pCH.X
             pDC_res=pDC.X
             SOE_res=SOE.X
-            SEDnRresult.PDC=pCH_res
-            SEDnRresult.PCH=pDC_res
-            SEDnRresult.PBESS=pDC_res-pCH_res
-            SEDnRresult.SOE=SOE_res
-
+            result.PCH=pCH_res
+            result.PDC=pDC_res
+            result.PBESS=pDC_res-pCH_res
+            result.SOE=SOE_res
             for t in range(T):
                 if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
                     self.logger.warning(f"t={t}")
@@ -2104,20 +2259,42 @@ class SEDnR(EDnR):
                     self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
                     self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
                     raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
-            
-        return SEDnRresult
+
+        ## CALCULATE REAL COST OF ED+R [D-1] PLANNING: ED, R, PURCHASES AND SALES
+        Cost_of_EDnR=0
+        for t in range(T):
+            # P_ED
+            Cost_of_EDnR+=np.sum(self.c_gen_copkwh*result.Pgen[:,t])
+            # P^DC_ED - only pay BESS per kwh cycled aka discharged, "they" pay for the charge up
+            if self.HAS_BESS:
+                Cost_of_EDnR+=self.c_chdc_copkwh*pDC_res[t]
+            # R+ and R-
+            Cost_of_EDnR+=reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(result.H_p[:,t]+result.H_n[:,t]))
+            # buying and selling
+            if self.transactive:
+                for j in (self.lenneighbors):
+                    # if actually buying, add (LAM+lineCost) * P_C
+                    if result.P_C[j,t]>1e-2:
+                        Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
+                    # if actually selling, sub LAM * P_V
+                    if result.P_V[j,t]>1e-2:
+                        Cost_of_EDnR-=self.lam_V_k[j,t]*result.P_V[j,t]
+        result.EDnRcost=Cost_of_EDnR
+        return result
     
 #ED+R decision taken with P(Q) from xihat itself, no assuming distribution
 class REDnR(EDnR):
     def __init__(self,MG:MG,subperiods:int=30,strictlycircularbess:bool=True,BESS_SOE_init=0.0,
                  plotcolors=None,seed=None,
-                 grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,**kwargs):
-        super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,plotcolors,seed,grb_verbose,logger_scope,logger_level,**kwargs)
-    def solve(self,TrainSampleSet,Q=95,reservecost_wrt_gencost=0.4,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
+                 grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,**kwargs):
+        super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,plotcolors,seed,grb_verbose,logger_scope,logger_level,LastInstance,model_name=None,**kwargs)
+    def solve(self,TrainSampleSet,Q=100,reservecost_wrt_gencost=0.4,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
         """
         Solve Robust EDnR. Returns decision x_dec=EDnRresult object with {Pgen[GxT],PBESS[T],SOE[T],fpart,
         ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,EDcost,Rcost}, and in-sample performance Jis=ED+R cost [D-1].
         """
+        self.reservecost_wrt_gencost=reservecost_wrt_gencost
+
         # Update nominal day with expected from sample set
         self.updateNominaltoSampleSetMean(TrainSampleSet)
                 
@@ -2138,119 +2315,13 @@ class REDnR(EDnR):
                 
         # Llama solve_robust con las reservas maximas y los escenarios de variacion extremos
         x_dec=self.solve_robust(Ximax,Ximin,REDnRparams,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs) ## ED AND R RESULTS
+        if x_dec==-1: return None,-1
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
         # convierte el resultado Jis
         J_is=x_dec.EDnRcost
         return x_dec,J_is     
        
-    # def resolve(self,trainSampleSet=None,Q=95,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
-    #     if not self.hasBeenSolved:
-    #         raise Exception("Instance must be solved once with solve() before resolve() can be called") 
-        
-    #     # New average day from sample set
-    #     if trainSampleSet is not None:
-    #         self.logger.debug("updating nominal rnwgen,demand with trainSampleSet passed to resolve()")
-    #         self.updateNominaltoSampleSetMean(trainSampleSet)
-    
-    #         # Reset Pmax constraint with new nominal gen
-    #         self.pmaxCtrt.RHS=np.vstack([np.array(g.gen_curve_pu)*g.power_kw for g in self.MG.Gens])
-            
-    #         # Reset balance constraint RHS with new nominal demand curve
-    #         self.loadbalanceCtrt.RHS=self.demand_curve_kw 
-
-    #         # if new sample set passed
-    #         # Update MAX MIN xi ctrt RHS
-    #         XiScenarioSet=self.GetVarScenariosFromSampleSet(trainSampleSet)
-    #         self.logger.debug(f"updating Q to: {Q}")
-    #         if Q>100:
-    #             Ximax=(Q/100)*np.max(XiScenarioSet,axis=0)
-    #             Ximin=(Q/100)*np.min(XiScenarioSet,axis=0)
-    #         else:
-    #             Ximax=np.percentile(XiScenarioSet,Q,axis=0)
-    #             Ximin=np.percentile(XiScenarioSet,100-Q,axis=0)
-    #         self.logger.debug(f"updating Ximax to :{Ximax}")
-    #         self.logger.debug(f"updating Ximin to :{Ximin}")
-    #         self.ximaxCtrt.RHS=Ximax
-    #         self.ximinCtrt.RHS=Ximin
-            
-    #     if lambdas_C is not None and lambdas_V is not None and z_PC is not None and z_PV is not None:
-    #         self.logger.debug("updating z and lambda values (RHS) with ADMM parameters passed to resolve()")
-    #         if not self.transactive:
-    #             raise Exception("Instance not set for transactive EDnR, cannot pass ADMM parameters")
-    #         if self.neighborhs==[]:
-    #             raise Exception("Instance has no neighbors, cannot pass ADMM parameters")
-    #         if not (len(lambdas_C)==self.lenneighbors and len(lambdas_V)==self.lenneighbors and len(z_PC)==self.lenneighbors and len(z_PV)==self.lenneighbors):
-    #             raise Exception("ADMM parameter lists must have same length as number of neighbors")
-            
-    #         self.z_PC_k=z_PC
-    #         self.z_PV_k=z_PV
-    #         self.lam_C_k=lambdas_C
-    #         self.lam_V_k=lambdas_V
-    #         # Update ADMM parameters RHSs
-    #         self.z_PC_ctrt.RHS=self.z_PC_k
-    #         self.z_PV_ctrt.RHS=self.z_PV_k
-    #         self.lam_C_ctrt.RHS=self.lam_C_k
-    #         self.lam_V_ctrt.RHS=self.lam_V_k
-            
-    #     M=self.M
-    #     self.logger.debug("solving...")
-    #     try:
-    #         M.optimize()
-    #     except gp.GurobiError as e:
-    #         self.logger.warning(f"Uhhh something happened: {e}")
-    #         self.logger.warning(f"{M.NumVars} Vars, {M.NumNZs} Num NZs, {M.NumConstrs} Constraints, {M.NumQConstrs} QConstrts, {M.NumGenConstrs} GenCtrts, {M.NumBinVars} BinVars, {M.NumSOS} SOSCtrts")
-    #         M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
-    #     self.sol_time.append(M.Runtime)
-    #     if M.status==GRB.OPTIMAL:
-    #         self.logger.debug(f"ED solved optimally in {M.Runtime:.2f} seconds")
-    #         self.hasBeenSolved=True
-    #     else:
-    #         logging.warning(f"ED not solved optimally. Status: {M.status}")
-    #         try:
-    #             M.computeIIS()
-    #             M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
-    #             logging.warning("Irreducible Inconsistent Subsystem written to .ilp")
-    #         except gp.GurobiError as e:
-    #             logging.error(f"Error reported when computing IIS: {e}")
-    #     pG_res=self.pG.X
-    #     # Build Result Object
-    #     REDnRresult=types.SimpleNamespace()
-    #     # Pgen[GxT],PBESS[T],SOE[T],EDcost
-    #     REDnRresult.Pgen=pG_res
-    #     REDnRresult.EDnRcost=M.ObjVal
-    #     REDnRresult.fpart=self.fpart.X
-    #     REDnRresult.H_p=self.Rp.X
-    #     REDnRresult.H_n=self.Rn.X
-    #     REDnRresult.ResT_p=np.sum(self.Rp.X,axis=0)
-    #     REDnRresult.ResT_n=np.sum(self.Rn.X,axis=0)
-    #     if self.transactive:
-    #         REDnRresult.P_C=self.P_C.X
-    #         REDnRresult.P_V=self.P_V.X
-        
-    #     if self.HAS_BESS:
-    #         pCH_res=self.pCH.X
-    #         pDC_res=self.pDC.X
-    #         SOE_res=self.SOE.X
-    #         REDnRresult.PDC=pCH_res
-    #         REDnRresult.PCH=pDC_res
-    #         REDnRresult.PBESS=pDC_res-pCH_res
-    #         REDnRresult.SOE=SOE_res
-    #         for t in range(self.T):
-    #             if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-    #                 self.logger.warning(f"t={t}")
-    #                 self.logger.warning(f"pCH_res: {pCH_res[:t+1]}")
-    #                 self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
-    #                 self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
-    #                 raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
-    #     if plot_ED:
-    #         self.plotED(REDnRresult,**kwargs) 
-
-    #     # EDnR results, new solution
-    #     x_dec=REDnRresult
-    #     J_is=x_dec.EDnRcost
-    #     return x_dec,J_is #x_dec,Jis
-
     def solve_robust(self,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,grb_verbose=None,BESS_SOE_init=None,**kwargs):
         """
         Meant to be called by solve(). Solves Robust EDnR with Quantile edge samples (can be {}) and
@@ -2362,13 +2433,18 @@ class REDnR(EDnR):
     
         # FOR ADMM MODE, THE RESOLVE WRAPPER UPDATES RHS of z_PV_ctrt, z_PC_ctrt, lam_C_ctrt, lam_V_ctrt
         if self.transactive:
-            if self.neighborhs==[]:
+            if self.neighbors==[]:
                 raise Exception("transactive EDnR requires neighbors list")
             else:
-                if z_PC is not None: self.z_PC_k=z_PC
-                if z_PV is not None: self.z_PV_k=z_PV
-                if lambdas_C is not None: self.lam_C_k=lambdas_C
-                if lambdas_V is not None: self.lam_V_k=lambdas_V
+                # Z AND LAMBDAS MUST BE SET
+                assert z_PC is not None, f"z_PC is None"
+                assert z_PV is not None, f"z_PV is None"
+                assert lambdas_C is not None, f"lambdas_C is None"
+                assert lambdas_V is not None, f"lambdas_V is None"
+                self.z_PC_k=z_PC
+                self.z_PV_k=z_PV
+                self.lam_C_k=lambdas_C
+                self.lam_V_k=lambdas_V
                 # Add P compras and P ventas variables to model
                 P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
                 P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
@@ -2403,44 +2479,48 @@ class REDnR(EDnR):
             M.optimize()
         except gp.GurobiError as e:
             self.logger.warning(f"Uhhh something happened: {e}")
-            self.logger.warning(f"{M.NumVars} Vars, {M.NumNZs} Num NZs, {M.NumConstrs} Constraints, {M.NumQConstrs} QConstrts, {M.NumGenConstrs} GenCtrts, {M.NumBinVars} BinVars, {M.NumSOS} SOSCtrts")
-            M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
+            self.logger.warning(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
+            return -1
         self.sol_time.append(M.Runtime)
         if M.status==GRB.OPTIMAL:
-            self.logger.debug(f"ED solved optimally in {M.Runtime:.2f} seconds")
+            self.logger.debug(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
             self.hasBeenSolved=True
         else:
-            logging.warning(f"ED not solved optimally. Status: {M.status}")
+            logging.warning(f"ED not solved optimally. Status: {self.M.status}")
             try:
                 M.computeIIS()
-                M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
+                M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
                 logging.warning("Irreducible Inconsistent Subsystem written to .ilp")
+                return -1
             except gp.GurobiError as e:
                 logging.error(f"Error reported when computing IIS: {e}")
-        # Get Result Data
-        pG_res=pG.X
+                return -1
+
         # Build Result Object
-        REDnRresult=types.SimpleNamespace()
-        # Pgen[GxT],PBESS[T],SOE[T],EDcost
-        REDnRresult.Pgen=pG_res
-        REDnRresult.EDnRcost=M.ObjVal
-        REDnRresult.fpart=fpart.X
-        REDnRresult.H_p=Rp.X
-        REDnRresult.H_n=Rn.X
-        REDnRresult.ResT_p=np.sum(Rp.X,axis=0)
-        REDnRresult.ResT_n=np.sum(Rn.X,axis=0)
+        result=SimpleNamespace()
+        result.ObjVal=M.ObjVal
+        result.MPO=self.loadbalanceCtrt.Pi
+
+        result.Pgen=pG.X
+        result.fpart=fpart.X
+        result.H_p=Rp.X
+        result.H_n=Rn.X
+        result.ResT_p=np.sum(Rp.X,axis=0)
+        result.ResT_n=np.sum(Rn.X,axis=0)
+
         if self.transactive:
-            REDnRresult.P_C=P_C.X
-            REDnRresult.P_V=P_V.X
+            result.P_C=P_C.X
+            result.P_V=P_V.X
         
         if self.HAS_BESS:
             pCH_res=pCH.X
             pDC_res=pDC.X
             SOE_res=SOE.X
-            REDnRresult.PDC=pCH_res
-            REDnRresult.PCH=pDC_res
-            REDnRresult.PBESS=pDC_res-pCH_res
-            REDnRresult.SOE=SOE_res
+            result.PCH=pCH_res
+            result.PDC=pDC_res
+            result.PBESS=pDC_res-pCH_res
+            result.SOE=SOE_res
             for t in range(T):
                 if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
                     self.logger.warning(f"t={t}")
@@ -2448,21 +2528,42 @@ class REDnR(EDnR):
                     self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
                     self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
                     raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
-            
-        return REDnRresult        
         
+        ## CALCULATE REAL COST OF ED+R [D-1] PLANNING: ED, R, PURCHASES AND SALES
+        Cost_of_EDnR=0
+        for t in range(T):
+            # P_ED
+            Cost_of_EDnR+=np.sum(self.c_gen_copkwh*result.Pgen[:,t])
+            # P^DC_ED - only pay BESS per kwh cycled aka discharged, "they" pay for the charge up
+            if self.HAS_BESS:
+                Cost_of_EDnR+=self.c_chdc_copkwh*pDC_res[t]
+            # R+ and R-
+            Cost_of_EDnR+=reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(result.H_p[:,t]+result.H_n[:,t]))
+            # buying and selling
+            if self.transactive:
+                for j in (self.lenneighbors):
+                    # if actually buying, add (LAM+lineCost) * P_C
+                    if result.P_C[j,t]>1e-2:
+                        Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
+                    # if actually selling, sub LAM * P_V
+                    if result.P_V[j,t]>1e-2:
+                        Cost_of_EDnR-=self.lam_V_k[j,t]*result.P_V[j,t]        
+        result.EDnRcost=Cost_of_EDnR
+        return result        
     
 class DRWEDnR(EDnR):
     def __init__(self,MG:MG,subperiods:int=30,strictlycircularbess:bool=True,BESS_SOE_init=0.0,
                  plotcolors=None,seed=None,
-                 grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,**kwargs):
-        super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,plotcolors,seed,grb_verbose,logger_scope,logger_level,**kwargs)
+                 grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,**kwargs):
+        super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,plotcolors,seed,grb_verbose,logger_scope,logger_level,LastInstance,model_name,**kwargs)
         
-    def solve(self,TrainSampleSet,rwass=0.1,Q=95,reservecost_wrt_gencost=0.4,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
+    def solve(self,TrainSampleSet,rwass=0.001,Q=100,reservecost_wrt_gencost=0.4,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
         """
         Solve Distributionally Robust Wasserstein EDnR. Returns decision x_dec=EDnRresult object
         with {Pgen[GxT],PBESS[T],SOE[T],fpart,ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,EDcost,Rcost}, and in-sample performance Jis=ED+R cost [D-1].
         """
+        self.reservecost_wrt_gencost=reservecost_wrt_gencost
+
         # Update nominal day with expected from sample set
         self.updateNominaltoSampleSetMean(TrainSampleSet)
                 
@@ -2482,121 +2583,12 @@ class DRWEDnR(EDnR):
         
         # Llama solve_dro con las reservas maximas y los escenarios de variacion extremos
         x_dec=self.solve_drow(XiScenarioSet,Ximax,Ximin,rwass,DRWEDnRparams,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs) ## ED AND R RESULTS
+        if x_dec==-1: return None,-1
         # convierte el resultado Jis
         J_is=x_dec.EDnRcost
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
         return x_dec,J_is
-        
-    # def resolve(self,trainSampleSet=None,rwass=None,Q=95,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
-    #     if not self.hasBeenSolved:
-    #         raise Exception("Instance must be solved once with solve() before resolve() can be called") 
-        
-    #     # New average day from sample set
-    #     if trainSampleSet is not None:
-    #         self.logger.debug("updating nominal rnwgen,demand with trainSampleSet passed to resolve()")
-    #         self.updateNominaltoSampleSetMean(trainSampleSet)
-    
-    #         # Reset Pmax constraint with new nominal gen
-    #         self.pmaxCtrt.RHS=np.vstack([np.array(g.gen_curve_pu)*g.power_kw for g in self.MG.Gens])
-            
-    #         # Reset balance constraint RHS with new nominal demand curve
-    #         self.loadbalanceCtrt.RHS=self.demand_curve_kw 
-
-    #         # if new sample set passed
-    #         # Update SAMPLE CTRT RHS
-    #         XiScenarioSet=self.GetVarScenariosFromSampleSet(trainSampleSet)
-    #         self.updateXiScenarioSetVar(XiScenarioSet)    
-    #         if Q>100:
-    #             Ximax=(Q/100)*np.max(XiScenarioSet,axis=0)
-    #             Ximin=(Q/100)*np.min(XiScenarioSet,axis=0)
-    #         else:
-    #             Ximax=np.percentile(XiScenarioSet,Q,axis=0)
-    #             Ximin=np.percentile(XiScenarioSet,100-Q,axis=0)
-    #         self.ximaxCtrt.RHS=Ximax
-    #         self.ximinCtrt.RHS=Ximin
-        
-    #     if rwass is not None:
-    #         self.rwass_ctrt.RHS=rwass
- 
-    #     if lambdas_C is not None and lambdas_V is not None and z_PC is not None and z_PV is not None:
-    #         self.logger.debug("updating z and lambda values (RHS) with ADMM parameters passed to resolve()")
-    #         if not self.transactive:
-    #             raise Exception("Instance not set for transactive EDnR, cannot pass ADMM parameters")
-    #         if self.neighborhs==[]:
-    #             raise Exception("Instance has no neighbors, cannot pass ADMM parameters")
-    #         if not (len(lambdas_C)==self.lenneighbors and len(lambdas_V)==self.lenneighbors and len(z_PC)==self.lenneighbors and len(z_PV)==self.lenneighbors):
-    #             raise Exception("ADMM parameter lists must have same length as number of neighbors")
-            
-    #         self.z_PC_k=z_PC
-    #         self.z_PV_k=z_PV
-    #         self.lam_C_k=lambdas_C
-    #         self.lam_V_k=lambdas_V
-    #         # Update ADMM parameters RHSs
-    #         self.z_PC_ctrt.RHS=self.z_PC_k
-    #         self.z_PV_ctrt.RHS=self.z_PV_k
-    #         self.lam_C_ctrt.RHS=self.lam_C_k
-    #         self.lam_V_ctrt.RHS=self.lam_V_k
-            
-    #     M=self.M
-    #     self.logger.debug("solving...")
-    #     try:
-    #         M.optimize()
-    #     except gp.GurobiError as e:
-    #         self.logger.warning(f"Uhhh something happened: {e}")
-    #         self.logger.warning(f"{M.NumVars} Vars, {M.NumNZs} Num NZs, {M.NumConstrs} Constraints, {M.NumQConstrs} QConstrts, {M.NumGenConstrs} GenCtrts, {M.NumBinVars} BinVars, {M.NumSOS} SOSCtrts")
-    #         M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
-    #     self.sol_time.append(M.Runtime)
-    #     if M.status==GRB.OPTIMAL:
-    #         self.logger.debug(f"ED solved optimally in {M.Runtime:.2f} seconds")
-    #         self.hasBeenSolved=True
-    #     else:
-    #         logging.warning(f"ED not solved optimally. Status: {M.status}")
-    #         try:
-    #             M.computeIIS()
-    #             M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
-    #             logging.warning("Irreducible Inconsistent Subsystem written to .ilp")
-    #         except gp.GurobiError as e:
-    #             logging.error(f"Error reported when computing IIS: {e}")
-    #     pG_res=self.pG.X
-    #     # Build Result Object
-    #     DRWEDnRresult=types.SimpleNamespace()
-    #     # Pgen[GxT],PBESS[T],SOE[T],EDcost
-    #     DRWEDnRresult.Pgen=pG_res
-    #     DRWEDnRresult.EDnRcost=M.ObjVal
-    #     DRWEDnRresult.fpart=self.fpart.X
-    #     DRWEDnRresult.H_p=self.Rp.X
-    #     DRWEDnRresult.H_n=self.Rn.X
-    #     DRWEDnRresult.ResT_p=np.sum(self.Rp.X,axis=0)
-    #     DRWEDnRresult.ResT_n=np.sum(self.Rn.X,axis=0)
-    #     DRWEDnRresult.kappa=self.kappa.X
-    #     if self.transactive:
-    #         DRWEDnRresult.P_C=self.P_C.X
-    #         DRWEDnRresult.P_V=self.P_V.X
-        
-    #     if self.HAS_BESS:
-    #         pCH_res=self.pCH.X
-    #         pDC_res=self.pDC.X
-    #         SOE_res=self.SOE.X
-    #         DRWEDnRresult.PDC=pCH_res
-    #         DRWEDnRresult.PCH=pDC_res
-    #         DRWEDnRresult.PBESS=pDC_res-pCH_res
-    #         DRWEDnRresult.SOE=SOE_res
-    #         for t in range(self.T):
-    #             if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-    #                 self.logger.warning(f"t={t}")
-    #                 self.logger.warning(f"pCH_res: {pCH_res[:t+1]}")
-    #                 self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
-    #                 self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
-    #                 raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
-    #     if plot_ED:
-    #         self.plotED(DRWEDnRresult,**kwargs) 
-
-    #     # EDnR results, new solution
-    #     x_dec=DRWEDnRresult
-    #     J_is=x_dec.EDnRcost
-    #     return x_dec,J_is #x_dec,Jis        
-        
     
     def solve_drow(self,XiScenarioSet,Ximax,Ximin,rwass,params,reservecost_wrt_gencost,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,grb_verbose=None,BESS_SOE_init=None,**kwargs):
         """
@@ -2646,13 +2638,14 @@ class DRWEDnR(EDnR):
         self.fpart=fpart
         
         ## RESERVE CONSTRAINTS
+        self.logger.debug(f"ximin: {Ximin}, ximax={Ximax}")
         self.ximinCtrt=M.addConstr(ximin_v==Ximin,"ximinctrt")
         self.ximaxCtrt=M.addConstr(ximax_v==Ximax,"ximaxctrt")
         fpartis1=M.addConstrs((fpart[:,t].sum()==1 for t in range(T)),"fpartis1") # sum of participation factors is 1 at each t
         RpandPGenLim=M.addConstrs((p_gmin_kw_mtx[:,t]<=pG[:,t]-Rn[:self.Ngen,t] for t in range(T)),"RpandPGenLim")
         RnandPGenLim=M.addConstrs((pG[:,t]+Rp[:self.Ngen,t]<=p_gmax_kw_mtx[:,t] for t in range(T)),"RnandPGenLim")
-        fpartximax=M.addConstr(-Rn+fpart*Ximax<=np.zeros(((self.Ngen+self.HAS_BESS),T)),"fpartximax")
-        fpartximin=M.addConstr(Rp+fpart*Ximin>=np.zeros(((self.Ngen+self.HAS_BESS),T)),"fpartximin")
+        fpartximax=M.addConstrs((fpart[:,t]*Ximax[t]<=Rn[:,t] for t in range(T)),"fpartximax")
+        fpartximin=M.addConstrs((-fpart[:,t]*Ximin[t]<=Rp[:,t] for t in range(T)),"fpartximin")
  
         # Full costs vector Gens+BESS
         c_gen_copkwh_w_bess=self.c_gen_copkwh
@@ -2725,13 +2718,18 @@ class DRWEDnR(EDnR):
 
         # FOR ADMM MODE, THE RESOLVE WRAPPER UPDATES RHS of z_PV_ctrt, z_PC_ctrt, lam_C_ctrt, lam_V_ctrt
         if self.transactive:
-            if self.neighborhs==[]:
+            if self.neighbors==[]:
                 raise Exception("transactive EDnR requires neighbors list")
             else:
-                if z_PC is not None: self.z_PC_k=z_PC
-                if z_PV is not None: self.z_PV_k=z_PV
-                if lambdas_C is not None: self.lam_C_k=lambdas_C
-                if lambdas_V is not None: self.lam_V_k=lambdas_V
+                # Z AND LAMBDAS MUST BE SET
+                assert z_PC is not None, f"z_PC is None"
+                assert z_PV is not None, f"z_PV is None"
+                assert lambdas_C is not None, f"lambdas_C is None"
+                assert lambdas_V is not None, f"lambdas_V is None"
+                self.z_PC_k=z_PC
+                self.z_PV_k=z_PV
+                self.lam_C_k=lambdas_C
+                self.lam_V_k=lambdas_V
                 # Add P compras and P ventas variables to model
                 P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
                 P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
@@ -2760,52 +2758,66 @@ class DRWEDnR(EDnR):
                   
         ### LOAD BALANCE CONSTRAINT
         self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
-                     
+
+        M.Params.QCPDual=1
         M.setObjective(self.fobj, GRB.MINIMIZE)
         self.logger.debug("solving...")
         try:
             M.optimize()
         except gp.GurobiError as e:
             self.logger.warning(f"Uhhh something happened: {e}")
-            self.logger.warning(f"{M.NumVars} Vars, {M.NumNZs} Num NZs, {M.NumConstrs} Constraints, {M.NumQConstrs} QConstrts, {M.NumGenConstrs} GenCtrts, {M.NumBinVars} BinVars, {M.NumSOS} SOSCtrts")
-            M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
+            self.logger.warning(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.lp")
+            return -1
         self.sol_time.append(M.Runtime)
         if M.status==GRB.OPTIMAL:
-            self.logger.debug(f"ED solved optimally in {M.Runtime:.2f} seconds")
+            self.logger.debug(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
             self.hasBeenSolved=True
         else:
-            logging.warning(f"ED not solved optimally. Status: {M.status}")
+            logging.warning(f"ED not solved optimally. Status: {self.M.status}")
             try:
                 M.computeIIS()
-                M.write(f"model_{M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
+                M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
                 logging.warning("Irreducible Inconsistent Subsystem written to .ilp")
+                return -1
             except gp.GurobiError as e:
                 logging.error(f"Error reported when computing IIS: {e}")
-        # Get Result Data
-        pG_res=pG.X
+                return -1
+
         # Build Result Object
-        DRWEDnRresult=types.SimpleNamespace()
-        # Pgen[GxT],PBESS[T],SOE[T],EDcost
-        DRWEDnRresult.Pgen=pG_res
-        DRWEDnRresult.EDnRcost=M.ObjVal
-        DRWEDnRresult.fpart=fpart.X
-        DRWEDnRresult.H_p=Rp.X
-        DRWEDnRresult.H_n=Rn.X
-        DRWEDnRresult.ResT_p=np.sum(Rp.X,axis=0)
-        DRWEDnRresult.ResT_n=np.sum(Rn.X,axis=0)
-        DRWEDnRresult.kappa=kappa.X
+        result=SimpleNamespace()
+        result.ObjVal=M.ObjVal
+        # GETTING THE DUALS MAY BE A BIT HARDER IN DROW
+        try:
+            result.MPO=self.loadbalanceCtrt.Pi
+        except gp.GurobiError as e:
+            self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
+            fixedmodel=M.fixed()
+            fixedmodel.optimize()
+            fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
+            result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
+            assert len(result.MPO)==T and (result.MPO>0).all(),"Invalid LMP/MPOs."
+
+        result.Pgen=pG.X
+        result.fpart=fpart.X
+        result.H_p=Rp.X
+        result.H_n=Rn.X
+        result.ResT_p=np.sum(Rp.X,axis=0)
+        result.ResT_n=np.sum(Rn.X,axis=0)
+        result.kappa=kappa.X
+
         if self.transactive:
-            DRWEDnRresult.P_C=P_C.X
-            DRWEDnRresult.P_V=P_V.X
+            result.P_C=P_C.X
+            result.P_V=P_V.X
         
         if self.HAS_BESS:
             pCH_res=pCH.X
             pDC_res=pDC.X
             SOE_res=SOE.X
-            DRWEDnRresult.PDC=pCH_res
-            DRWEDnRresult.PCH=pDC_res
-            DRWEDnRresult.PBESS=pDC_res-pCH_res
-            DRWEDnRresult.SOE=SOE_res
+            result.PCH=pCH_res
+            result.PDC=pDC_res
+            result.PBESS=pDC_res-pCH_res
+            result.SOE=SOE_res
             for t in range(T):
                 if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
                     self.logger.warning(f"t={t}")
@@ -2813,5 +2825,316 @@ class DRWEDnR(EDnR):
                     self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
                     self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
                     raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
+
+        ## CALCULATE REAL COST OF ED+R [D-1] PLANNING: ED, R, PURCHASES AND SALES
+        Cost_of_EDnR=0
+        for t in range(T):
+            # P_ED
+            Cost_of_EDnR+=np.sum(self.c_gen_copkwh*result.Pgen[:,t])
+            # P^DC_ED - only pay BESS per kwh cycled aka discharged, "they" pay for the charge up
+            if self.HAS_BESS:
+                Cost_of_EDnR+=self.c_chdc_copkwh*pDC_res[t]
+            # R+ and R-
+            Cost_of_EDnR+=reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(result.H_p[:,t]+result.H_n[:,t]))
+            # buying and selling
+            if self.transactive:
+                for j in (self.lenneighbors):
+                    # if actually buying, add (LAM+lineCost) * P_C
+                    if result.P_C[j,t]>1e-2:
+                        Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
+                    # if actually selling, sub LAM * P_V
+                    if result.P_V[j,t]>1e-2:
+                        Cost_of_EDnR-=self.lam_V_k[j,t]*result.P_V[j,t]        
+        result.EDnRcost=Cost_of_EDnR
+        return result           
+
+# EN MODO ADMM (transactive=true at init):
+# AT xEDnR() INIT se *deben* setear building params:
+# rho, neighbors, linecaps, linecosts
+# AT SOLVE/RESOLVE se *deben* setear z,lam iter params (sea k=0 o no):
+# NO SE PUEDE RESETEAR RHO
+
+# option 3: init ADMM to config
+class ADMMexchange:
+    def __init__(self,MGs:list[MG],method:str,Nsamples:int,ednrparams:list[dict],LastInstanceGens:list[str],
+                 neighbors:dict[int,list[int]],linecosts:float,lineCaps:dict[tuple[int,int],float|int],
+                 rho:float|int,max_iters:int,error_threshold=1E-6,
+                 P_C={}, P_V={},     
+                    z_PC={}, z_PV={},   
+                    lam_C={}, lam_V={}, 
+                    state_init={},
+                 seed=None,logger_level=logging.CRITICAL):
+
+        ## INIT LOGGER
+        admmlogger=logging.getLogger(__name__)
+        logging.basicConfig(format="[%(lineno)2s - %(funcName)2s] %(message)s")
+        admmlogger.setLevel(logger_level)
+        self.admmlogger=admmlogger
+        T=24
+
+        ## ====== INPUT PARSING AND ASSERTS ===========
+        assert len(MGs)==len(neighbors)==len(ednrparams), "Diff lengths"
+
+        methods={"d":detEDnR,"s":SEDnR,"r":REDnR,"drw":DRWEDnR}
+        assert method in methods,"method should be one of 'd', 's', 'r', 'drw'"
+        # SELECT SOLVER CLASS
+        xEDnR=methods[method]
+
+        # SMALL TEST RUN
+        admmlogger.warning("Testing detEDnR with MGs")
+        for i,mg in enumerate(MGs):
+            detEDnR(mg,**ednrparams[i]).solve(**ednrparams[i])
+        admmlogger.warning("===Test successfull. Initializing MMG===")
+
+
+        ## PARSING NEIGHBORS dict-of-lists into sets per line
+        agents_idx={i+1 for i in range(len(MGs))}
+        assert agents_idx==set(neighbors.keys()), "neighbors keys should be 1,2,...,N_MGs"
+        # sets de 2|E| aristas dirigidas y de |E| aristas no dirigidas 
+        # dir pa construir init x,lams por agente por vecino
+        # undir pa actualizar z una sola vez por par (i,j)
+        directed_edges, undirected_edges = set(),set()
+        for i in agents_idx:
+            for j in neighbors.get(i, []):
+                directed_edges.add((i,j))
+                assert i != j, f"MG {i} cannot be neighbor to itself"
+                undirected_edges.add(tuple(sorted((i,j))))
+        
+        ## PARSING ADMM INIT PARAMS 
+        ## Inicializar x por vecino por agente
+        if P_C=={} or P_V=={}:
+            assert P_C==P_V, "both P_C and P_V should both be set (or not)"
+            for (i,j) in directed_edges:
+                P_C[(i,j)]=np.zeros(T)
+                P_V[(i,j)]=np.zeros(T)
+        else:
+            for (i,j) in directed_edges:
+                assert P_C.get((i,j)) is not None, f"P_C doesn't have {(i,j)}"
+                assert P_V.get((i,j)) is not None, f"P_V doesn't have {(i,j)}"
+
+        ## Inicializar z y lambdas por vecino por agente
+        if z_PC=={} or z_PV=={} or lam_C=={} or lam_V=={}:
+            assert z_PC==z_PV==lam_C==lam_V, "initial z and lambdas should all be set (or not)"
+            # admmlogger.debug(f"dual if: {[(i,j) for j in neighbors.get(i) for i in agents]} ")
+            # dual if doesnt work, just does cartesian product!
+            for (i,j) in directed_edges:
+                z_PC[(i,j)]=np.zeros(T)
+                z_PV[(i,j)]=np.zeros(T)
+                lam_C[(i,j)]=np.zeros(T)
+                lam_V[(i,j)]=np.zeros(T)
+        else:
+            for (i,j) in directed_edges:
+                assert z_PC.get((i,j)) is not None, f"z_PC doesn't have {(i,j)}"
+                assert z_PV.get((i,j)) is not None, f"z_PV doesn't have {(i,j)}"
+                assert lam_C.get((i,j)) is not None, f"lam_C doesn't have {(i,j)}"
+                assert lam_V.get((i,j)) is not None, f"lam_V doesn't have {(i,j)}"
+
+        # INITIAL STATE (e.g. WARM START PARAMS)
+        state = {i: {} for i in agents_idx} if state_init=={} else state_init
+
+        # Printing inputs
+        admmlogger.debug(f"state_init has: {set(state_init.keys())}")
+        admmlogger.debug(f"P_C: {P_C}")
+        admmlogger.debug(f"P_V: {P_V}")
+        admmlogger.debug(f"z_PC: {z_PC}")
+        admmlogger.debug(f"z_PV: {z_PV}")
+        admmlogger.debug(f"lam_C: {lam_C}")
+        admmlogger.debug(f"lam_V: {lam_V}")
+
+        ## SOLVER ADMM PARAMS CONFIG
+        lineCapsDup={e:cap for (i,j), cap in lineCaps.items() for e in ((i,j),(j,i))} # Both directions appear
+        lineCapsPerAgent={i:[lineCapsDup.get((i,j),0.0) for j in neighbors.get(i)] for i in agents_idx} # list per agentidx, caps ordered based on neighbors[i] order
+        ADMMsolverinit_global={'transactive':True,'rho':rho,'lineCosts':linecosts}
+        ADMMsolverinit={i:{'neighbors':neighbors[i], 'lineCapacities':lineCapsPerAgent[i]}
+                        | ADMMsolverinit_global  for i in agents_idx}
+        ## ====== BUILDING DICT OF AGENTS ======
+        agents={}
+        solvers=[]
+        Train_Sets=[]
+        for i,mg in enumerate(MGs):
+            agentidx=i+1
+            admmlogger.info(f"Setting up solver for MG{agentidx}")
+            solvers.append(xEDnR(mg,**ednrparams[i]|ADMMsolverinit[agentidx],
+                             LastInstance=LastInstanceGens[i],model_name=f"MG{agentidx}_{method}"))
+            Train_Sets.append(solvers[i].generateSampleSet(Nsamples))
+            agents[agentidx]={'solver':solvers[i],
+                         'solverparams': {'trainSampleSet':Train_Sets[i]}|ednrparams[i] }
+
+        # ====== INIT HISTORIAS ======
+
+        # DICT OF LISTS, HARDER TO BUILD, EASIER TO PARSE
+        # Residuo Primal ||lambda_k+1 - lambda_k|| per k>=2
+        # Residuo Dual ||z_k+1 - z_k|| per k>=2
+        primal_hist = {idx:{"linf":[], 'l2':[]} for idx in agents_idx|{'sum'}}
+        dual_hist = {idx:{"linf":[], 'l2':[]} for idx in undirected_edges|{'sum'}}
+        P_C_hist = {(i,j):[] for (i,j) in directed_edges}
+        P_V_hist = {(i,j):[] for (i,j) in directed_edges}
+        # IN THIS CASE LIST OF DICTS
+        # statehist=[{i:{},j:{}} , {...}] guarda copia del state por agente per iter
+        x_state_hist = [] 
+        R_prim,R_dual={},{}
+
+        convergenceCondition=False
+        k=0
+        admmlogger.warning("Initialized. Starting ADMM")
+
+        while(k<max_iters and not convergenceCondition):
+            admmlogger.warning(f"===== k: {k}=====")
+            admmlogger.debug(f"Prev P_C: {P_C}")
+            admmlogger.debug(f"Prev P_V: {P_V}")
+            admmlogger.info("====Updating x====")
+
+            # ---------- (1) ACTUALIZACIÓN x^k+1: usa z^k y lam^k (secuencial) ----------
+            for i,config in agents.items():
+                admmlogger.info(f"i: {i}")
+                admmlogger.debug(f"n_i:{neighbors.get(i)}")
+                # x=[(i,j) for j in neighbors.get(i)]
+                # admmlogger.debug(x)
+                z_PC_i = np.array([z_PC.get((i, j)) for j in neighbors.get(i)])
+                z_PV_i = np.array([z_PV.get((i, j)) for j in neighbors.get(i)])
+                lam_C_i = np.array([lam_C.get((i, j)) for j in neighbors.get(i)])
+                lam_V_i = np.array([lam_V.get((i, j)) for j in neighbors.get(i)])
+                solver=config.get('solver')
+                params=config.get('solverparams') # |state[i]['param_x'] # may be useful for warm start 
+                
+                solver.logger.debug(f"z_PC_i: {z_PC_i}")
+                solver.logger.debug(f"z_PV_i: {z_PV_i}")
+                solver.logger.debug(f"lam_C_i: {lam_C_i}")
+                solver.logger.debug(f"lam_V_i: {lam_V_i}")
+
+                xdec,jis = solver.solveOrResolve(**params,z_PC=z_PC_i,z_PV=z_PV_i,lambdas_C=lam_C_i,lambdas_V=lam_V_i) 
+                res={"P_C":{(i,j): xdec.P_C[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
+                    "P_V":{(i,j): xdec.P_V[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
+                    "state":{'xdec':{}}} # Que guardar para warm start
+                solver.logger.debug(f"res: {res}")
+                # Actualiza P_C y P_V locales del agente i
+                for tup, val in res.get("P_C").items():
+                    P_C[tup] = deepcopy(val)
+                    # Guardar hist
+                    P_C_hist[tup].append(val)
+                for tup, val in res.get("P_V").items():
+                    P_V[tup] = deepcopy(val)
+                    # Guardar hist
+                    P_V_hist[tup].append(val)
+
+                # Warm start: guarda el nuevo estado del agente i
+                state[i] = deepcopy(res.get("state"))
+                del res
+                
+            admmlogger.debug("----x results----")
+            admmlogger.debug(f"P_C: {P_C}")
+            admmlogger.debug(f"P_V: {P_V}")
+
+            x_state_hist.append( {i:deepcopy(state[i]) for i in agents} )
+
+            # ---------- (2) ACTUALIZACIÓN z^k+1: usa x^{k+1} y lam^k ----------
+            # Guarda z^k para residuales de consenso por agente
+            admmlogger.info("----Previous z----")
+            admmlogger.debug(f"z_PC: {z_PC}")
+            admmlogger.debug(f"z_PV: {z_PV}")
+            admmlogger.info("====Updating z====")
+            z_PC_prev = deepcopy(z_PC)
+            z_PV_prev = deepcopy(z_PV)
+
+            for (i, j) in undirected_edges:
+                # Actualiza consensos una vez por linea
+                PVi_j  = P_V[(i, j)]
+                PCj_i  = P_C[(j, i)]
+                PCi_j  = P_C[(i, j)]
+                PVj_i  = P_V[(j, i)]
+                lVi_j  = lam_V[(i, j)]
+                lCj_i  = lam_C[(j, i)]
+                lCi_j  = lam_C[(i, j)]
+                lVj_i  = lam_V[(j, i)]
+
+                tPV_ij = 0.5 * (PVi_j + PCj_i) + (lVi_j + lCj_i) / (2.0 * rho)
+                z_PV[(i, j)] = tPV_ij
+                z_PC[(j, i)] = tPV_ij
+
+                tPC_ij = 0.5 * (PCi_j + PVj_i) + (lCi_j + lVj_i) / (2.0 * rho)
+                z_PC[(i, j)] = tPC_ij
+                z_PV[(j, i)] = tPC_ij
+
+            admmlogger.debug(f"z_PC: {z_PC}")
+            admmlogger.debug(f"z_PV: {z_PV}")
+            # ---------- (3) ACTUALIZACIÓN lam^k+1: usa P^{k+1} y z^{k+1} ----------
+            admmlogger.info("----Previous lam----")
+            admmlogger.debug(f"lam_C: {lam_C}")
+            admmlogger.debug(f"lam_V: {lam_V}")
+            lam_C_prev = deepcopy(lam_C)
+            lam_V_prev = deepcopy(lam_V)
+
+            admmlogger.info("====Updating lambda====")
+            for i in agents:
+                for j in neighbors.get(i, []):
+                    lam_V[(i, j)] += rho * (P_V[(i, j)] - z_PV[(i, j)])
+                    lam_C[(i, j)] += rho * (P_C[(i, j)] - z_PC[(i, j)])
+            admmlogger.debug(f"lam_C: {lam_C}")
+            admmlogger.debug(f"lam_V: {lam_V}")
+
+            # ---------- (4) RESIDUALES DE CONSENSO POR AGENTE y HISTORIA DE P ----------
+            # Residuals primal y dual, de L2 y Linf de cada agente/line, y suma
+            # Primal (d_lambda) es per agent, dual (d_z) es per line
+            admmlogger.info("====Calculating Residuals====")
+            # Prev_R_prim=deepcopy(R_prim)
+            # Prev_R_dual=deepcopy(R_dual)
+
+
+            # PRIMAL RES: ||lambda_k+1 - lambda_k||
+            linf_t=0.0
+            l2_t=0.0
+            for i in agents:
+                linf_i = 0.0
+                l2_i   = 0.0
+                for j in neighbors.get(i, []):
+                    d_lam_c = lam_C[(i, j)] - lam_C_prev.get((i, j)) 
+                    d_lam_v = lam_V[(i, j)] - lam_V_prev.get((i, j)) 
+                    linf_i = max( linf_i , np.abs(d_lam_c).max() , np.abs(d_lam_c).max() )
+                    l2_i  += (d_lam_c**2).sum() + (d_lam_v**2).sum()
+                primal_hist[i]["linf"].append(linf_i)
+                primal_hist[i]["l2"].append(l2_i**0.5)
+                R_prim[i]={"linf":linf_i,"l2":l2_i**0.5}
+                linf_t+=linf_i
+                l2_t+=l2_i**0.5
+            primal_hist['sum']["linf"].append(linf_t)
+            primal_hist['sum']["l2"].append(l2_t)
+            R_prim['sum']={"linf":linf_t,"l2":l2_t}
+            admmlogger.debug(f"R_prim: {R_prim}")
+
+            # DUAL RES: ||z_k+1 - z_k||
+            linf_t=0.0
+            l2_t=0.0
+            for (i,j) in undirected_edges:
+                d_pc = z_PC[(i, j)] - z_PC_prev.get((i, j)) 
+                d_pv = z_PV[(j, i)] - z_PV_prev.get((j, i)) 
+                linf_ij = max( np.abs(d_pc).max() , np.abs(d_pv).max() )
+                l2_ij  = (d_lam_c**2).sum() + (d_lam_v**2).sum()
+                dual_hist[(i,j)]["linf"].append(linf_ij)
+                dual_hist[(i,j)]["l2"].append(l2_ij**0.5)
+                R_dual[(i,j)]={"linf":linf_ij,"l2":l2_ij**0.5}
+                linf_t += linf_ij
+                l2_t += l2_ij**0.5
+            dual_hist['sum']["linf"].append(linf_t)
+            dual_hist['sum']["l2"].append(l2_t)
+            R_dual['sum']={"linf":linf_t,"l2":l2_t}
+            admmlogger.debug(f"R_prim: {R_dual}")
+
             
-        return DRWEDnRresult             
+            # Update convergence cond
+            # convergenceCondition=False # Añadir condición para e.g. norma de residuo
+            convergenceCondition = ( R_prim['sum']["l2"] <= 1E-6 or R_prim['sum']["linf"] <= error_threshold)
+            k+=1
+
+        self.result = {
+            # Estado final
+            "P_C": P_C,"P_V": P_V,
+            "z_PC": z_PC,"z_PV": z_PV,
+            "lam_C": lam_C,"lam_V": lam_V,
+            "state": state,
+            # Historias
+            'primal_hist':primal_hist,'dual_hist':dual_hist,
+            "P_C_hist": P_C_hist,"P_V_hist": P_V_hist,
+            "x_state_hist": x_state_hist,      # dict i -> lista de estados (warm-start friendly)
+        }
+    def get_result(self):
+        return self.result
