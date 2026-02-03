@@ -470,10 +470,6 @@ class EDnR(genericStochasticProgram):
             self.lineCapacities=kwargs.get("lineCapacities") # Max line capacity with each neighbor (kW)
             self.lineCosts=kwargs.get("lineCosts") # Cost of energy transacted with neighbors ($/kWh)
             # Z AND LAMBDAS ARE SET ON SOLVE/RESOLVE
-            # self.z_PC_k=kwargs.get("z_PC_k",np.ones((self.lenneighbors,self.T)))
-            # self.z_PV_k=kwargs.get("z_PV_k",np.ones((self.lenneighbors,self.T)))
-            # self.lam_C_k=kwargs.get("lam_C_k",np.ones((self.lenneighbors,self.T)))
-            # self.lam_V_k=kwargs.get("lam_V_k",np.ones((self.lenneighbors,self.T)))  
             self.logger.warning(f"Instance set for transactive EDnR. neighbors: rho: {self.rho}, linecaps: {self.lineCapacities}, linecosts: {self.lineCosts}")
         else:
             self.logger.warning("Instance set for non-transactive EDnR")   
@@ -810,27 +806,8 @@ class EDnR(genericStochasticProgram):
     # def randomizeDemand(self,sigma_day=0.08,sigma_period=0.08,sigma_fast=0.08,window=12,**kwargs):
     def randomizeDemand(self,sigma_day=0.12,sigma_period=0.12,sigma_fast=0.15,window=12,**kwargs):
         # ###### Remember, #P(-2*sigma<dev<+2*sigma)=95%, 3sigma~99.7%
-
-        # ADDITIVE RANDOMNESS INSTEAD OF MULTIPLICATIVE; MAY FINISH LATER
-        # # Daily variation
-        # dayDev_kw=(dayDev:=self.rng.normal(0,sigma_day))*self.peak_demand_kw_smpgen 
-        # # Period-wise variation
-        # periodDev_kw=self.rng.normal(0, sigma_period, self.T)*self.demand_curve_pu_smpgen
-        # # Subperiod-wise variation        
-        # periodDev_kw_strechted=np.vstack([[periodDev_kw] for _ in range(self.subperiods)]).T.flatten()
-        # subperiodDev_kw=self.rng.normal(0, sigma_fast, self.T*self.subperiods)*periodDev_kw_strechted
-        # # Add to base curve
-        # fastDemCurve=dayDev_kw+periodDev_kw_strechted+subperiodDev_kw+self.peak_demand_kw_smpgen*self.demand_curve_pu_smpgen
-        # fastDemCurve=np.concatenate([periodDem*self.rng.normal(1,sigma_fast,self.subperiods) for periodDem in realDemCurve_kw])
-        # startfiller=self.rng.normal(1,sigma_fast,window-window//2-1)*realDemCurve_kw[-1]
-        # endfiller=self.rng.normal(1,sigma_fast,window//2)*realDemCurve_kw[0]
-        # fastDemCurve=np.concatenate([startfiller,fastDemCurve,endfiller])
-        # # Low Pass Filter aka Moving Average
-        # LPFimpResp=np.ones(window)/window
-        # fastDemCurve_LPF=np.convolve(fastDemCurve,LPFimpResp,mode='valid') #LPF aka promedio movil
-        # # return fastDemCurve_LPF,dayDev
-    
-        # IT WORKS, BUT MAY SHIFT SAMPLE MEAN A BIT TOO MUCH BC GEOMETRIC RANDOMNESS
+        # ADDITIVE RANDOMNESS INSTEAD OF MULTIPLICATIVE; MAY DO LATER
+        # CURRENT WORKS, BUT MAY SHIFT SAMPLE MEAN A BIT TOO MUCH BC GEOMETRIC RANDOMNESS
         # Daily variation
         realPeak=self.peak_demand_kw_smpgen*(dayDev:=self.rng.normal(1,sigma_day))
         # Period variation
@@ -1011,13 +988,6 @@ class EDnR(genericStochasticProgram):
         # self.logger.debug(EDnRres.H_n)
         # self.logger.debug(EDnRres.ResT_p)
 
-        # attempt 2
-        # Build op cost matrix (Nsources x T) to plot_op
-        # op_cost=np.zeros((Nsources,self.T))
-        # idxdispatchable=[i for i,g in enumerate(self.MG.Gens) if g.dispatchable]
-        # if self.HAS_BESS:
-        #     idxdispatchable.append(-1)
-        
 
         for tf,dem in enumerate(fastEffDem):
             tper,tmod=divmod(tf,self.subperiods)
@@ -1090,72 +1060,6 @@ class EDnR(genericStochasticProgram):
                         overdischargingpower_kw = overdischarge_kwh  / ((24/self.T) * self.eta_ch)
                         DeltaPG[-1,tper] -= overdischargingpower_kw
                         DeltaPG[iLI,tper] += overdischargingpower_kw
-            
-            # ### attemp/AFTER_2 : do it but at period transitions
-            # op_cost_tper=np.zeros(Nsources)
-            # # Luego si Calcular costos de AGC al final de periodo
-            # for idx in range(Nsources):
-            #     if DeltaPG[idx,tper]==0:
-            #         continue
-            #     elif DeltaPG[idx,tper]>0: # Above PED
-            #         op_cost_tper[]+=cost_agc_copkwh_max[:,t]*DeltaPG[idx]
-            #         total_op_cost+=max(EDnRres.MPO[tper],self.c_gen_copkwh[i])*myDeltaPgen_at_tper
-            #     elif DeltaPG[idx,tper]<0: # Below PED
-            #         total_op_cost+=price_min*myDeltaPgen_at_tper
-            
-            # # Mas bien, if NOT, recorta sus indices (if mpptavail) del op_cost, before np.sum() and plot
-            # # aja pero los tendria que recortar al final mas bien xdddd
-            # # stick to after_1
-            # if Type2HasReconCost:
-            #     if self.solarMPPTavailable:
-            #         self.debug("fastDeltaPSolar",fastDeltaPSolar)
-            #         if (spv_gen:=np.sum(fastDeltaPSolar[tper*self.subperiods:tf+1])) >=0:
-            #             op_cost_tper += max(EDnRres.MPO[tper],self.c_gen_copkwh[self.idx_solarMPPT]) * spv_gen
-            #         else:
-            #             op_cost_tper += min(EDnRres.MPO[tper],self.c_gen_copkwh[self.idx_solarMPPT]) * spv_gen
-            #     if self.windMPPTavailable:
-            #         self.debug("fastDeltaPWind",fastDeltaPWind)
-            #         if (wt_gen:=np.sum(fastDeltaPWind[tper*self.subperiods:tf+1])) >=0:
-            #             op_cost_tper += max(EDnRres.MPO[tper],self.c_gen_copkwh[self.idx_windMPPT]) * wt_gen
-            #         else:
-            #             op_cost_tper += min(EDnRres.MPO[tper],self.c_gen_copkwh[self.idx_windMPPT]) * wt_gen
-            
-            # # Put on op_cost
-            # op_cost[:,tper]=op_cost_tper
-            
-        # IF Type3 NO REC cost CLIP MPPT from op_cost, then np.sum()
-        # then plot 
-                
-        ### Calculate cost for t for all dispatchables, including BESS
-        # =========================
-        ## BEFORE : Cost for DeltaPgen in Op is the same as in ED [symmetric]
-        # idxdispatchable=[i for i,g in enumerate(self.MG.Gens) if g.dispatchable]
-        # disp_gennames=[self.MG.Gens[i].type for i in idxdispatchable]
-        # disp_c_gens_copkwh=[self.MG.Gens[i].rate_copkwh for i in idxdispatchable]
-        # if self.HAS_BESS:
-        #     idxdispatchable.append(-1)
-        #     disp_gennames.append('BESS')
-        #     disp_c_gens_copkwh.append(self.c_chdc_copkwh)
-        # c_gens_tiled=np.tile(disp_c_gens_copkwh,(self.T,1)).T
-
-        # # se recorta, unicamente se visualiza DelPG de los dispatchable (Ndisp,T), Ndisp<=Nsources
-        # op_cost=c_gens_tiled*DeltaPG[idxdispatchable,:]
-        # # self.logger.debug(f"idxdispatchable:{idxdispatchable}, disp_gennames:{disp_gennames}, disp_c_gens_copkwh: {disp_c_gens_copkwh}")
-        # # self.logger.debug(f"c_gens_tiled:{c_gens_tiled}")
-        # # self.logger.debug(f"DeltaPG: {DeltaPG},\n\n,opcost:{op_cost}")
-        # total_op_cost=np.sum(op_cost)
-        # # If Type 2s play in recourse cost, add it to opcost
-        # # y aun asi no se visualiza
-        # if Type2HasReconCost:
-        #     if self.solarMPPTavailable:
-        #         total_op_cost+=sum(self.MG.Gens[self.idx_solarMPPT].rate_copkwh*fastDeltaPSolar)
-        #     if self.windMPPTavailable:
-        #         total_op_cost+=sum(self.MG.Gens[self.idx_windMPPT].rate_copkwh*fastDeltaPWind)
-        # =========================
-        
-
-        # with timed("MGOperation --- Calculating Recourse cost",self.logger):
-
 
         ### AFTER_1 : Cost for DeltaPgen>0 is max(c_i,LMP), for DeltaPgen<0 is min(c_i,LMP) [asymmetric]. 
         # Not quite CREG 64/2000 bc no "ED ideal" but asymmetric rate is important
@@ -1232,42 +1136,7 @@ class EDnR(genericStochasticProgram):
             disp_gennames=[n for i,n in enumerate(self.gennames) if i in idxdispatchable]+self.HAS_BESS*['BESS']
             # then calculate total op cost
             total_op_cost=np.sum(op_cost)
-        
-        
-        # attempt 1.5
-        # total_op_cost=0
-        # for t in range(self.T):
-        #     # overload
-        #     if (DeltaPG[:self.Ngen,t]>=0).all():
-        #         total_op_cost+=cost_agc_copkwh_max[:,t]*DeltaPG[idx_gens_rec,t]
-        #     # underload
-        #     elif (DeltaPG[:self.Ngen,t]<=0).all():
-        #         total_op_cost+=cost_agc_copkwh_min[:,t]*DeltaPG[idx_gens_rec,t]
-        #     else:
-        #         self.logger.debug(f"huh, at t:{t}: {DeltaPG[idx_gens_rec,t]}")
-        #         # MUST PUT COST THINGS INSIDE FAST CYCLE OR DO ANOTHER THINGIE
-        #         # FOR THE COST OF iLI
-        #     if self.HAS_BESS:
-        #         total_op_cost+=self.c_chdc_copkwh*DeltaPG[-1,t]
-        
-        # # If Type 2s play in recourse cost, add it to opcost
-        # # ONLY WAY IS TO PUT IT INSIDE A BIG CYCLE TO INDEX WITH fast_i//subperiods
-        # # OR JUST FUCKING MOVE IT UP ABOVE TOO
-        # if Type2HasReconCost:
-        #     if self.solarMPPTavailable:
-        #         for f in fastDeltaPSolar:
-        #             if f>=0:
-        #                 total_op_cost+=np.max(EDnRres.MPO,self.MG.Gens[self.idx_solarMPPT].rate_copkwh) * f
-        #             else:
-        #                 total_op_cost+=min(EDnRres.MPO,self.MG.Gens[self.idx_solarMPPT].rate_copkwh) * f
-        #     if self.windMPPTavailable:
-        #             for f in fastDeltaPWind:
-        #                 if f>=0:
-        #                     total_op_cost+=max(EDnRres.MPO,self.MG.Gens[self.idx_windMPPT].rate_copkwh) * f
-        #                 else:
-        #                     total_op_cost+=min(EDnRres.MPO,self.MG.Gens[self.idx_windMPPT].rate_copkwh) * f
-        # if self.HAS_BESS: disp_gennames.append('BESS')
-        
+
         # Plot
         if plot_op:
             periods=np.arange(0,24+1/self.T,24/self.T)
