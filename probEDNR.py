@@ -34,7 +34,7 @@ def timed(title:str,logger:logging.Logger,show=True): # with timed(): ...
     end_time = time.time()
     diff=end_time-start_time
     if show:
-        logger.critical(f'====== {title} took: {diff*1000:.2f} ms ======')
+        logger.warning(f'====== {title} took: {diff*1000:.2f} ms ======')
 
 def vectoprint(arr,n=1,perc=False):
     s="%" if perc else "f"
@@ -221,23 +221,30 @@ class genericStochasticProgram:
         with timed("solveTest calling Joos()",self.logger):
             Joos,PrViol=self.Joos(x_dec,testSampleSet)
         reliability=float((Joos<=Jis))
-        self.logger.warning(f"Jis: {Jis}")
-        self.logger.warning(f"Joos: {Joos}")
-        self.logger.warning(f"rel: {reliability}")
-        self.logger.warning(f"prvio: {PrViol}")
+        self.logger.info(f"Jis: {Jis}")
+        self.logger.info(f"Joos: {Joos}")
+        self.logger.info(f"rel: {reliability}")
+        self.logger.info(f"prvio: {PrViol}")
         #  PrViol is always a vector
         return x_dec,Jis,Joos,reliability,PrViol
     
+    ###################
+    ### INTERFACES FOR DOING
+    # for s in trainsets: for p in params: solvetest(p,s)
+    # results=(Nexperiments,Nparams)
+
     def iter_params(self,trainSampleSet,testSampleSet,paramRange):
         """
         Meant to be used by simulate(), NOT DIRECTLY.
         Generator for iterating over solveTest() while varying parameters over a given range.
         """       
         # self.logger.critical(f"paramrange: {paramRange}")
-
-        for params in paramRange:
+        dontupdateTrainSample=False
+        for i,params in enumerate(paramRange):
             # yields a tuple ( , , , []) for every p
-            yield self.solveTest(trainSampleSet,testSampleSet,**params)
+            self.logger.warning(f"=== Params[{i}] : {params} ===")
+            if i>0: dontupdateTrainSample=True
+            yield self.solveTest(trainSampleSet,testSampleSet,dontupdateTrainSample=dontupdateTrainSample,**params)
 
     def simulate(self,trainSampleSet,testSampleSet,paramRange):
         """
@@ -253,24 +260,69 @@ class genericStochasticProgram:
         Joos=list(Joos)
         rel=list(rel)
         prviol=list(prviol)
-        self.logger.warning(f"Joos: {Joos}")
-        self.logger.warning(f"Jis: {Jis}")
-        self.logger.warning(f"prviol: {prviol}")
-        self.logger.warning(f"rel: {rel}")
+        self.logger.info(f"Joos: {Joos}")
+        self.logger.info(f"Jis: {Jis}")
+        self.logger.info(f"prviol: {prviol}")
+        self.logger.info(f"rel: {rel}")
         return x_dec,Jis,Joos,rel,prviol
     
-    def iter_traindata(self,trainSampleSets,testSampleSet,paramRange):
+    def iter_traindata_overparams(self,trainSampleSets,testSampleSet,paramRange):
         """
         Meant to be used by runSimulations(), NOT DIRECTLY.
         Generator for iterating over simulate() while varying the training sample set used used to solve, over a given set of datasets.
+        for trainsets: for params: solvetest()
         """
         # self.logger.critical(f"paramrange: {paramRange}")
 
         for i,dataset in enumerate(trainSampleSets):
-            self.logger.info(f"Experiment #{i}")
+            self.logger.warning(f"=== Experiment Set #{i} ===")
             yield self.simulate(dataset,testSampleSet,paramRange)
+    ###################
 
-    def runSimulations(self,trainSampleSets,testSampleSet,paramRange:list=[{}]):
+
+    ###################
+    ### INTERFACES FOR DOING
+    # for p in params: for s in trainsets: solvetest(p,s)
+    # results=(Nexperiments,Nparams) # SAME SHIT
+    def iter_samples(self,trainSampleSets,testSampleSet,params):
+        """
+        Meant to be used by simulate(), NOT DIRECTLY.
+        Generator for iterating over solveTest() while varying parameters over a given range.
+        """       
+        # self.logger.critical(f"paramrange: {paramRange}")
+
+        for i,dataset in enumerate(trainSampleSets):
+            # yields a tuple ( , , , []) for every p
+            self.logger.warning(f"=== Experiment Set #{i} ===")
+            yield self.solveTest(dataset,testSampleSet,**params)
+    
+    def simulate_over_samples(self,trainSampleSets,testSampleSet,params):
+        x_dec,Jis,Joos,rel,prviol = zip(*[(_x, _ji, _jo, _r, _pv) for _x, _ji, _jo, _r, _pv in self.iter_samples(trainSampleSets,testSampleSet,params)])
+        Jis=list(Jis)
+        Joos=list(Joos)
+        rel=list(rel)
+        prviol=list(prviol)
+        self.logger.info(f"Joos: {Joos}")
+        self.logger.info(f"Jis: {Jis}")
+        self.logger.info(f"prviol: {prviol}")
+        self.logger.info(f"rel: {rel}")
+        return x_dec,Jis,Joos,rel,prviol
+    
+    def iter_params_overtraindata(self,trainSampleSets,testSampleSet,paramRange):
+        """
+        Meant to be used by runSimulations(), NOT DIRECTLY.
+        Generator for iterating over simulate_over_samples() while varying the params used to solve, over a given set of params.
+        for params: for trainsets: solvetest()
+        """
+        for i,params in enumerate(paramRange):
+            # yields a tuple ( , , , []) for every p
+            self.logger.warning(f"=== Params[{i}] : {params} ===")
+            yield self.simulate_over_samples(trainSampleSets,testSampleSet,params)
+
+    ###################
+
+
+    def runSimulations(self,trainSampleSets,testSampleSet,paramRange:list=[{}],big_for_is_params=False):
         """
         Iteratively do experiments with simulate() with a set of different trainSample input sets using iter_traindata(),
         in order to obtain robust measurements of performance for the stochastic program, over a given parameter range.
@@ -278,21 +330,39 @@ class genericStochasticProgram:
         """
         # self.logger.critical(f"paramrange: {paramRange}")
 
-        x_dec,Jis,Joos,rel,prviol=zip(*self.iter_traindata(trainSampleSets,testSampleSet,paramRange))
-        Jis=list(Jis)
-        Joos=list(Joos)
-        rel=list(rel)
-        prviol=list(prviol)
-        self.logger.warning(f"Jis: {Jis}")
-        self.logger.warning(f"prvio: {prviol}")
-        self.logger.warning(f"rel: {rel}")
+        if big_for_is_params:
+            x_dec,Jis,Joos,rel,prviol=zip(*self.iter_params_overtraindata(trainSampleSets,testSampleSet,paramRange))
+            Jis=np.transpose(list(Jis))
+            Joos=np.transpose(list(Joos))
+            rel=np.transpose(list(rel))
+            prviol=np.transpose(list(prviol),axes=(1,0,2))
+
+        else:
+            x_dec,Jis,Joos,rel,prviol=zip(*self.iter_traindata_overparams(trainSampleSets,testSampleSet,paramRange))
+            Jis=np.array(list(Jis))
+            Joos=np.array(list(Joos))
+            rel=np.array(list(rel))
+            prviol=np.array(list(prviol))
+
+        self.logger.info(f"Jis: {Jis}")
+        self.logger.info(f"prvio: {prviol}")
+        self.logger.info(f"rel: {rel}")
+        # jis and joos are [ [] [] ] of Nexperiments x Nparams  
+        # results statistics are of len Nparams 
         self.avgJis=np.mean(Jis,axis=0)
+        self.q25Jis=np.quantile(Jis,0.25,axis=0)
+        self.q75Jis=np.quantile(Jis,0.75,axis=0)
+
         self.avgJoos=np.mean(Joos,axis=0)
         self.q25Joos=np.quantile(Joos,0.25,axis=0)
         self.q75Joos=np.quantile(Joos,0.75,axis=0)
+        
         self.avgRel=np.mean(rel,axis=0)
-        #in case several PrViol
+        # in case several PrViol result is Npar x 2 e.g.
         self.avgPrViol=np.mean(prviol,axis=0)
+        self.q25Prviol=np.quantile(prviol,0.25,axis=0)
+        self.q75Prviol=np.quantile(prviol,0.75,axis=0)
+
         ## Define avg( decision ) in Child
         # self.avgDec=np.mean(x_dec,axis=0)
         return x_dec,Jis,Joos,rel,prviol
@@ -338,7 +408,7 @@ class EDnR(genericStochasticProgram):
     """
     def __init__(self,MG:MG,subperiods:int=30,strictlycircularbess:bool=True,BESS_SOE_init=0.0,
                  plotcolors=None,seed=None,grb_verbose:bool=False,logger_scope:int=1,
-                 logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,**kwargs):
+                 logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,needMPO:bool=False,**kwargs):
         """
         Generic Economic Dispatch with Reserve Wrapper Class Init.
         
@@ -454,6 +524,8 @@ class EDnR(genericStochasticProgram):
             else: #for-break-else is pretty cool
                 raise Exception(f"Last Instance Not Found: {LastInstance}")
 
+        self.needMPO=needMPO
+
         self.transactive=kwargs.get("transactive",False)
         # When inititating in TRANSACTIVE MODE
         # Instance must initiate with Neighbors, linecaps, linecosts, rho
@@ -474,7 +546,7 @@ class EDnR(genericStochasticProgram):
         else:
             self.logger.warning("Instance set for non-transactive EDnR")   
             
-        if not "xi_hat" in kwargs:
+        if "xi_hat" not in kwargs:
             self.logger.warning("No training sample provided for Model. Set when solving (non det-nominal).")
         else:
             raise NotImplementedError("For now, just set the trainsample when solving")
@@ -527,7 +599,7 @@ class EDnR(genericStochasticProgram):
         self.M.update()
         self.logger.info("training sample constraint built")
 
-    def solveOrResolve(self,trainSampleSet,**kwargs):
+    def solveOrResolve(self,trainSampleSet,dontupdateTrainSample=False,**kwargs):
         """
         If hasbeensolved, and given sampleset is same size as current OR currently no sample yet
         (i.e. only det-nominal has been run) calls resolve(), else createmodel() and calls solve().
@@ -535,7 +607,7 @@ class EDnR(genericStochasticProgram):
         fullretry=kwargs.get("fullretry",False)
         if fullretry: self.logger.warning("===== Doing a fullretry =====")
         
-        if not self.hasBeenSolved and not fullretry:
+        if not fullretry and not self.hasBeenSolved:
             self.logger.warning("Solving for the 1st time.")
             self.logger.info("Currently:")
             self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
@@ -544,7 +616,7 @@ class EDnR(genericStochasticProgram):
             self.logger.info("After 1st Solve:")
             self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
 
-        elif not hasattr(self,'samplectrt') and not fullretry:
+        elif not fullretry and not hasattr(self,'samplectrt'):
             self.logger.warning("Resolving. No sample ctrt.")
             self.logger.info("Currently:")
             self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
@@ -553,19 +625,21 @@ class EDnR(genericStochasticProgram):
             self.logger.info("After resolve:")
             self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
 
-        elif (self.samplectrt.RHS.shape[0]==len(trainSampleSet)) and not fullretry:
-            self.logger.debug(f"samplctrt={self.samplectrt.RHS.shape}, given set={len(trainSampleSet)}")
-            self.logger.warning("Resolving, updating samplectrt and/or other constraints.")
+        elif not fullretry and (self.samplectrt.RHS.shape[0]==len(trainSampleSet)):
+            self.logger.debug(f"samplctrt is={self.samplectrt.RHS.shape}, given set len={len(trainSampleSet)}")
+            if dontupdateTrainSample: self.logger.warning("Not updating trainSample, only other params")
+            else: self.logger.warning("Resolving, updating samplectrt and/or other params.")
             self.logger.info("Currently:")
             self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
             with timed("solveOrResolve calling resolve(), updating sampl ctrt",self.logger):
-                x_dec,Jis=self.resolve(True,trainSampleSet,**kwargs) 
+                x_dec,Jis=self.resolve(True,trainSampleSet,dontupdateTrainSample=dontupdateTrainSample,**kwargs) 
             self.logger.info("After resolve:")
             self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
                
         else:
-            self.logger.debug(f"samplctrt={self.samplectrt.RHS.shape}, given set={len(trainSampleSet)}")
-            self.logger.warning("Recreating whole model and solving lol.")
+            if hasattr(self,'samplectrt'):
+                self.logger.debug(f"samplctrt={self.samplectrt.RHS.shape}, given set={len(trainSampleSet)}")
+            self.logger.warning("Recreating whole model and solving.")
             self.logger.info("Currently:")
             self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
             # Recreate Gurobi Model
@@ -604,9 +678,11 @@ class EDnR(genericStochasticProgram):
                     kwargs["T_RB_dc_h"]=np.round(self.T_RB_dc_h*0.8,3)
                     kwargs["T_RB_ch_h"]=np.round(self.T_RB_ch_h*0.8,3)
                     kwargs["fpart_bess"]=np.round(self.fpart_bess*0.8,3)
+                
                 cresrv=self.customReserve
                 if min(cresrv["up"],cresrv["down"])>self.peak_demand_kw:
                     raise Exception(f"Retry with different params. kwargs: {kwargs} ")
+                
                 kwargs["customReserve"]={"up":np.round(cresrv["up"]*1.2,0),
                                             "down":np.round(cresrv["down"]*1.2,0)}
                 kwargs["fullretry"]=True
@@ -625,16 +701,16 @@ class EDnR(genericStochasticProgram):
             x_dec,Jis=self.solveOrResolve(trainSampleSet,**kwargs)
         # Whether solved or resolved, test the decision
         with timed("solveTest calling Joos()",self.logger):
-            Joos,PrViol=self.Joos(x_dec,testSampleSet)
+            Joos,PrViol=self.Joos(x_dec,testSampleSet,**kwargs)
         reliability=float(Joos<=Jis)
-        self.logger.warning(f"Jis: {Jis}")
-        self.logger.warning(f"prvio: {PrViol}")
-        self.logger.warning(f"rel: {reliability}")
+        self.logger.info(f"Jis: {Jis}")
+        self.logger.info(f"prvio: {PrViol}")
+        self.logger.info(f"rel: {reliability}")
         #  PrViol is always a vector
         return x_dec,Jis,Joos,reliability,PrViol
     
-    def resolve(self,hassamplectrt:bool,trainSampleSet,Q=None,rwass=None,
-                       lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
+    def resolve(self,hassamplectrt:bool,trainSampleSet=None,Q=None,rwass=None,
+                       lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,dontupdateTrainSample=False,**kwargs):
         """
         If given, actualiza trainsampleset (if samesize).
         If given, actualiza ADMM vars.
@@ -644,21 +720,31 @@ class EDnR(genericStochasticProgram):
         if not self.hasBeenSolved: # will never happen btw
             raise Exception("Instance must be solved once with solve() before resolve() can be called") 
         
+
+        # si estoy seteando o no puedo sacarla de smplctrt
+            # set xiscen
+            # si estoy seteando seteala
+        # si puedo sacarla y no estoy seteando
+            # sacala
+
         # New average day from sample set
-        self.logger.debug("updating nominal rnwgen and demand with trainSampleSet passed to resolve()")
-        self.updateNominaltoSampleSetMean(trainSampleSet)
+        if (trainSampleSet is not None and not dontupdateTrainSample) or not hassamplectrt:
+            self.logger.info("updating nominal rnwgen and demand with trainSampleSet passed to resolve()")
+            self.updateNominaltoSampleSetMean(trainSampleSet)
 
-        # Reset Pmax constraint with new nominal gen, the one set by heuristic_reserve
-        # Yes, sample set Pmax bounds for P_ED of Type2/MPPT gens, excess generated after PED is accounted for in Operation as eff Dem
-        self.pmaxCtrt.RHS=np.vstack([np.array(g.gen_curve_pu)*g.power_kw for g in self.MG.Gens])
-        
-        # Reset balance constraint RHS with new nominal demand curve
-        self.loadbalanceCtrt.RHS=self.demand_curve_kw 
+            # Reset Pmax constraint with new nominal gen, the one set by heuristic_reserve
+            # Yes, sample set Pmax bounds for P_ED of Type2/MPPT gens, excess generated after PED is accounted for in Operation as eff Dem
+            self.pmaxCtrt.RHS=np.vstack([np.array(g.gen_curve_pu)*g.power_kw for g in self.MG.Gens])
+            
+            # Reset balance constraint RHS with new nominal demand curve
+            self.loadbalanceCtrt.RHS=self.demand_curve_kw 
 
-        XiScenarioSet=self.GetVarScenariosFromSampleSet(trainSampleSet)
-        if hassamplectrt:
-            self.samplectrt.RHS=XiScenarioSet
-            self.M.update()
+            XiScenarioSet=self.GetVarScenariosFromSampleSet(trainSampleSet)
+            if hassamplectrt:
+                self.samplectrt.RHS=XiScenarioSet
+                self.M.update()
+        else:
+            XiScenarioSet=self.samplectrt.RHS
         
         # Update MAX MIN xi ctrt RHS
         if Q is not None:
@@ -678,7 +764,7 @@ class EDnR(genericStochasticProgram):
             self.rwass_ctrt.RHS=rwass
         
         if self.transactive:
-            assert lambdas_C is not None and lambdas_V is not None and z_PC is not None and z_PV is not None, "All z and lambdas must be set"
+            assert lambdas_C is not None and lambdas_V is not None and z_PC is not None and z_PV is not None, "All z and lambdas must be set on every resolve"
             assert not self.neighbors==[], "Instance has no neighbors, cannot pass ADMM parameters"
             assert self.lenneighbors==len(lambdas_C)==len(lambdas_V)==len(z_PC)==len(z_PV),"ADMM parameter lists must have same length as number of neighbors"
             
@@ -732,15 +818,16 @@ class EDnR(genericStochasticProgram):
         
         result.ObjVal=self.M.ObjVal
         # GETTING THE DUALS MAY BE A BIT HARDER IN DROW
-        try:
-            result.MPO=self.loadbalanceCtrt.Pi
-        except gp.GurobiError as e:
-            self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
-            fixedmodel=self.M.fixed()
-            fixedmodel.optimize()
-            fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
-            result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
-            assert len(result.MPO)==self.T and (result.MPO>0).all(),"Invalid LMP/MPOs."
+        if self.needMPO:
+            try:
+                result.MPO=self.loadbalanceCtrt.Pi
+            except gp.GurobiError as e:
+                self.logger.warning(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
+                fixedmodel=self.M.fixed()
+                fixedmodel.optimize()
+                fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
+                result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
+                assert len(result.MPO)==self.T and (result.MPO>0).all(),f"Invalid LMP/MPOs: {result.MPO}"
 
         result.Pgen=self.pG.X
         # ADMM variables
@@ -779,7 +866,7 @@ class EDnR(genericStochasticProgram):
                 Cost_of_EDnR+=self.reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(result.H_p[:,t]+result.H_n[:,t]))
             # buying and selling
             if self.transactive:
-                for j in (self.lenneighbors):
+                for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
                     if result.P_C[j,t]>1e-2:
                         Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
@@ -795,7 +882,8 @@ class EDnR(genericStochasticProgram):
     
         if plot_ED:
             self.plotED(result,**kwargs)            
-        return result,result.EDnRcost #x_dec,Jis
+        # return result,result.EDnRcost #x_dec,Jis
+        return result,result.ObjVal #x_dec,Jis # uhhh
 
     # For logically plotting SOE
     @staticmethod
@@ -930,11 +1018,12 @@ class EDnR(genericStochasticProgram):
             
     ## RECOURSE ACTION
     # Microgrid Operation - Reserve Execution 
-    def MGOperation(self,EDnRres,day_sample,/,Type2HasReconCost=True,plot_op=False,plotFastEffDemand=True,plotDeltaSOE=True,plot_DeltaPrnw=False):
+    def MGOperation(self,EDnRres,day_sample,/,Type2HasReconCost=True,asymm_Rec=True,asymm_uses_MPO_not_multiplier=False,RecMultiplier=1.2,plot_op=False,plotFastEffDemand=True,plotDeltaSOE=True,plot_DeltaPrnw=False,**kwargs):
         # clear_output()
         assert day_sample.subperiods==self.subperiods, "Sample subperiods do not match"
         assert hasattr(self,"LastInstance"), "Last Instance Gen name not specified"
         assert not self.LastInstance=='BESS', "BESS not allowed as Last Instance"
+        assert not asymm_uses_MPO_not_multiplier or self.needMPO, "Instance must be init with needMPO to use it"
         # Get the Last Instance Gen
         for iLI,gLI in enumerate(self.MG.Gens):
             if gLI.type==self.LastInstance:
@@ -946,7 +1035,25 @@ class EDnR(genericStochasticProgram):
         # with timed("MGOperation --- creating fastEffDem",self.logger):
 
         # Get Randomized Demand from sample
-        fastDemCurve,dayDev=day_sample.fastDemandCurve,day_sample.dayDev
+        fastDemCurve=day_sample.fastDemandCurve
+        if self.transactive:
+            Pbought=EDnRres.P_C
+            Psold=EDnRres.P_V
+            P_incoming=np.zeros(self.T)
+            for j in range(self.lenneighbors):
+                P_incoming+=Pbought[j]-Psold[j]
+
+            for t in range(self.subperiods):
+                fastDemCurve[t] -= P_incoming[t//self.T]
+
+            demandcurvekw=self.demand_curve_kw-P_incoming
+            self.logger.debug(f"Pbought:{Pbought.astype(int)}")
+            self.logger.debug(f"Psold:{Psold.astype(int)}")
+            self.logger.debug(f"P_incoming:{P_incoming.astype(int)}")
+        else:
+            demandcurvekw=self.demand_curve_kw
+
+        self.logger.debug(f"fastDemcurve:{fastDemCurve.astype(int)}")
         # Get Randomized (Max) Generation (for Intermittents T2) from sample
         fastDeltaGenCurve=np.zeros(self.T*self.subperiods)
         if self.solarMPPTavailable:
@@ -991,7 +1098,7 @@ class EDnR(genericStochasticProgram):
 
         for tf,dem in enumerate(fastEffDem):
             tper,tmod=divmod(tf,self.subperiods)
-            periodForecastedDem=self.demand_curve_kw[tper]
+            periodForecastedDem=demandcurvekw[tper]
             DeltaPL=dem-periodForecastedDem
             # self.logger.debug(f"tf:{tf}, DeltaPL:{DeltaPL}\n")
             # self.logger.debug(f"DeltaPG[:,tper]: {DeltaPG[:,tper]}\n")
@@ -1060,50 +1167,65 @@ class EDnR(genericStochasticProgram):
                         overdischargingpower_kw = overdischarge_kwh  / ((24/self.T) * self.eta_ch)
                         DeltaPG[-1,tper] -= overdischargingpower_kw
                         DeltaPG[iLI,tper] += overdischargingpower_kw
-
-        ### AFTER_1 : Cost for DeltaPgen>0 is max(c_i,LMP), for DeltaPgen<0 is min(c_i,LMP) [asymmetric]. 
-        # Not quite CREG 64/2000 bc no "ED ideal" but asymmetric rate is important
-        # EXCEPT THE BESS, IT SHOULD BE PAID THE SAME OFC        
-        disp_c_gens_copkwh=deepcopy(self.c_gen_copkwh)
-        # self.logger.debug(f"disp_c_gens_copkwh:{disp_c_gens_copkwh} ==== EDnRres.MPO;{EDnRres.MPO}")
-        # self.logger.debug(f"disp_c_gens_copkwh:{disp_c_gens_copkwh.shape} ==== EDnRres.MPO;{EDnRres.MPO.shape}")
-        c_gens_tiled=np.tile(disp_c_gens_copkwh,(self.T,1)).T
-        mpo_tiled=np.tile(EDnRres.MPO,(len(disp_c_gens_copkwh),1))
-        # self.logger.debug(f"c_gens_tiled:{c_gens_tiled}")
-        # self.logger.debug(f"c_gens_tiled:{c_gens_tiled.shape}")
-        # self.logger.debug(f"mpo_tiled:{mpo_tiled}")
-        # self.logger.debug(f"mpo_tiled:{mpo_tiled.shape}")
-        _cost_agc_auxmtx=np.stack([c_gens_tiled,mpo_tiled])
-        # self.logger.debug(f"_cost_agc_auxmtx:{_cost_agc_auxmtx}")
-        # self.logger.debug(f"_cost_agc_auxmtx:{_cost_agc_auxmtx.shape}")
-        cost_agc_copkwh_max=np.max(_cost_agc_auxmtx,axis=0)
-        # self.debug("cost_agc_copkwh_max",cost_agc_copkwh_max)
-        cost_agc_copkwh_min=np.min(_cost_agc_auxmtx,axis=0)
-        # self.debug("cost_agc_copkwh_min",cost_agc_copkwh_min)
-
-        # Calculate period real (effective) demand before touching DeltaPG
-        realEffDemand=self.demand_curve_kw+np.sum(DeltaPG,axis=0)
         
+        self.logger.debug(f"DeltaPG: {DeltaPG.astype(int)}")
+        # self.logger.debug(f"realEffDemand: {realEffDemand.astype(int)}")
+        DeltaPG_for_costs=deepcopy(DeltaPG)
+
         # normally, reconcile w the MPPTs over DeltaPgen
         if Type2HasReconCost:
             if self.solarMPPTavailable:
                 for t in range(self.T):
-                    DeltaPG[self.idx_solarMPPT,t]=np.sum(fastDeltaPSolar[t*self.subperiods:(t+1)*self.subperiods])
+                    DeltaPG_for_costs[self.idx_solarMPPT,t]=np.sum(fastDeltaPSolar[t*self.subperiods:(t+1)*self.subperiods])
             if self.windMPPTavailable:
                 for t in range(self.T):
-                    DeltaPG[self.idx_windMPPT,t]=np.sum(fastDeltaPWind[t*self.subperiods:(t+1)*self.subperiods])
+                    DeltaPG_for_costs[self.idx_windMPPT,t]=np.sum(fastDeltaPWind[t*self.subperiods:(t+1)*self.subperiods])
         # OFC this will add to DeltaPG although it was already considered in effective demand on sample average calculations
         # hence why we touch it afterwards, only to obtain the correct c_gens_tiled
+        self.logger.debug(f"DeltaPG_for_costs: {DeltaPG_for_costs.astype(int)}")
 
-        # watch this logical array selection magic
-        isPgeq0=DeltaPG[:self.Ngen,:]>=0
-        isPlessthan=~isPgeq0
-        self.logger.debug(f"c_gens_tiled:{c_gens_tiled}\n")
-        self.logger.debug(f"isPgeq0:{isPgeq0}\n")
-        self.logger.debug(f"isPlessthan:{isPlessthan}\n")
-        # huzzah correct asymmetric agc prices according to logical indexing
-        c_gens_tiled=isPgeq0*cost_agc_copkwh_max + isPlessthan*cost_agc_copkwh_min
-        self.debug("c_gens_tiled",c_gens_tiled)
+        disp_c_gens_copkwh=deepcopy(self.c_gen_copkwh)
+        c_gens_tiled=np.tile(disp_c_gens_copkwh,(self.T,1)).T
+        if asymm_Rec:
+            # Not quite CREG 64/2000 bc no "ED ideal" but asymmetric rate is important
+            # self.logger.info(f"DeltaPG: {DeltaPG.astype(int)}")
+            # watch this logical array selection magic
+            isPgeq0=DeltaPG_for_costs[:self.Ngen,:]>=0
+            isPlessthan=~isPgeq0
+            # self.logger.debug(f"c_gens_tiled:{c_gens_tiled}\n")
+            # self.logger.debug(f"isPgeq0:{isPgeq0}\n")
+            # self.logger.debug(f"isPlessthan:{isPlessthan}\n")
+            # EXCEPT THE BESS, IT SHOULD BE PAID THE SAME OFC        
+            # self.logger.debug(f"disp_c_gens_copkwh:{disp_c_gens_copkwh} ==== EDnRres.MPO;{EDnRres.MPO}")
+            # self.logger.debug(f"disp_c_gens_copkwh:{disp_c_gens_copkwh.shape} ==== EDnRres.MPO;{EDnRres.MPO.shape}")
+            # self.logger.debug(f"c_gens_tiled:{c_gens_tiled}")
+            # self.logger.debug(f"c_gens_tiled:{c_gens_tiled.shape}")
+            # self.logger.debug(f"mpo_tiled:{mpo_tiled}")
+            # self.logger.debug(f"mpo_tiled:{mpo_tiled.shape}")
+            # self.logger.debug(f"_cost_agc_auxmtx:{_cost_agc_auxmtx}")
+            # self.logger.debug(f"_cost_agc_auxmtx:{_cost_agc_auxmtx.shape}")
+            # self.debug("cost_agc_copkwh_max",cost_agc_copkwh_max)
+            # self.debug("cost_agc_copkwh_min",cost_agc_copkwh_min)
+
+                # asymmRec=True
+                # RecMultiplier=1
+
+
+            if asymm_uses_MPO_not_multiplier:
+                ### Cost for DeltaPgen>0 is max(c_i,LMP), for DeltaPgen<0 is min(c_i,LMP) [asymmetric]. 
+                mpo_tiled=np.tile(EDnRres.MPO,(len(disp_c_gens_copkwh),1))
+                _cost_agc_auxmtx=np.stack([c_gens_tiled,mpo_tiled])
+                cost_agc_copkwh_max=np.max(_cost_agc_auxmtx,axis=0)
+                cost_agc_copkwh_min=np.min(_cost_agc_auxmtx,axis=0)
+            
+            else:
+                cost_agc_copkwh_max=c_gens_tiled*RecMultiplier
+                cost_agc_copkwh_min=c_gens_tiled/RecMultiplier
+
+            # huzzah correct asymmetric agc prices according to logical indexing
+            c_gens_tiled=isPgeq0*cost_agc_copkwh_max + isPlessthan*cost_agc_copkwh_min
+        
+        # self.debug("c_gens_tiled",c_gens_tiled)
         
         # get idxdispatchable just in case
         idxdispatchable=[i for i,g in enumerate(self.MG.Gens) if g.dispatchable]
@@ -1115,13 +1237,19 @@ class EDnR(genericStochasticProgram):
             # concat Bess agc cost to c tiled
             c_gens_tiled=np.concatenate([c_gens_tiled,np.tile(self.c_chdc_copkwh,(1,24))],axis=0)
         self.debug("idxdispatchable",idxdispatchable)
-        self.debug("c_gens_tiled",c_gens_tiled)
         self.debug("disp_gennames",disp_gennames)
+        self.debug("c_gens_tiled",c_gens_tiled)
+
 
         # get op cost mtx, includes MPPT
-        op_cost=c_gens_tiled*DeltaPG
-        self.debug("op_cost",op_cost)
+        op_cost=c_gens_tiled*DeltaPG_for_costs
+        self.logger.debug(f"op_cost: {op_cost.astype(int)}")
+        # self.logger.info(f"DeltaPG: {DeltaPG.astype(int)}")
 
+        # Calculate period real (effective) demand before touching DeltaPG
+        realEffDemand=demandcurvekw+np.sum(DeltaPG,axis=0)
+        self.logger.debug(f"realEffDemand: {realEffDemand.astype(int)}")
+        
         # normally they get paid for agc as rec, as incentive to operator to predict better
         if Type2HasReconCost:
             # calculate sum
@@ -1142,7 +1270,7 @@ class EDnR(genericStochasticProgram):
             periods=np.arange(0,24+1/self.T,24/self.T)
             fig,ax0=plt.subplots(figsize=(14,8))
             # Expected Demand (hourly)
-            ax0.step(periods,np.append(self.demand_curve_kw,self.demand_curve_kw[-1]),where='post',lw=2,label='Dem. esperada [D-1]')
+            ax0.step(periods,np.append(demandcurvekw,demandcurvekw[-1]),where='post',lw=2,label='Dem. esperada [D-1]')
             # Effective Demand served with ED+R (hourly)
             ax0.step(periods,np.append(realEffDemand,realEffDemand[-1]),where='post',lw=2,label='Dem. atendida (ED+R) [D]')
             # Real Demand (fast)
@@ -1201,6 +1329,8 @@ class EDnR(genericStochasticProgram):
             # ax1.text(0.01,0.02,f"Desv. del pico diario={dayDev-1:.2%}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
             ax1.text(0.01,0.06,f"Rec. RSF=${total_op_cost:,.0f} COP",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
             ax1.text(0.81,0.06,f"Fuera de margen={Nundermargin+Novermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
+            if self.transactive:
+                ax1.text(0.01,0.02,"[\"Dem\"=Dem+PVen-PCompr]",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))     
             # ax1.text(0.81,0.02,f"Sobremarg={Novermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
             # ax1.text(0.81,0.06,f"Submarg={Nundermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
             fig.set_dpi(500)
@@ -1334,7 +1464,7 @@ class EDnR(genericStochasticProgram):
             Ximin=np.percentile(XiScenarioSet,100-float(Q),axis=0)
         return Ximax,Ximin
  
-    def heuristic_reserve(self,customReserve=None,customReg=None,peakSupportedDisconn=0.3,
+    def heuristic_reserve(self,customReserve=None,customReg=None,peakSupportedDisconn=0.6,
                           f_hi=62,f_low=58.5,fpart_bess=None,Type3GenFactor=0.5,
                         Res_verbose=False,T_RB_dc_h=2,T_RB_ch_h=2,**kwargs):
         """Solve deterministic EDnR. Returns Reserve decision object
@@ -1702,7 +1832,8 @@ class detEDnR(EDnR):
         x_dec.EDnRcost=x_dec.EDcost+x_dec.Rcost
         if plot_ED:
             self.plotED(x_dec,**kwargs)   
-        J_is=x_dec.EDnRcost
+        # J_is=x_dec.EDnRcost
+        J_is=x_dec.ObjVal # uhhhh
         return x_dec,J_is
     
     def detED(self,params={},lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
@@ -1830,7 +1961,7 @@ class detEDnR(EDnR):
         # Build Result Object
         result=SimpleNamespace()
         result.ObjVal=M.ObjVal
-        result.MPO=self.loadbalanceCtrt.Pi
+        if self.needMPO: result.MPO=self.loadbalanceCtrt.Pi
         result.Pgen=pG.X
 
         if self.transactive:
@@ -1863,7 +1994,7 @@ class detEDnR(EDnR):
                 Cost_of_ED+=self.c_chdc_copkwh*pDC_res[t]
             # buying and selling
             if self.transactive:
-                for j in (self.lenneighbors):
+                for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
                     if result.P_C[j,t]>1e-2:
                         Cost_of_ED+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
@@ -1917,7 +2048,8 @@ class SEDnR(EDnR):
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
         # convierte el resultado Jis
-        J_is=x_dec.EDnRcost
+        # J_is=x_dec.EDnRcost
+        J_is=x_dec.ObjVal # uhhhh
         return x_dec,J_is
     
     def solve_stochastic(self,XiScenarioSet,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
@@ -2100,7 +2232,17 @@ class SEDnR(EDnR):
         # Build Result Object
         result=SimpleNamespace()
         result.ObjVal=M.ObjVal
-        result.MPO=self.loadbalanceCtrt.Pi
+        # GETTING THE DUALS MAY BE A BIT HARDER WITH BATTERIES
+        if self.needMPO:
+            try:
+                result.MPO=self.loadbalanceCtrt.Pi
+            except gp.GurobiError as e:
+                self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
+                fixedmodel=M.fixed()
+                fixedmodel.optimize()
+                fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
+                result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
+                assert len(result.MPO)==T and (result.MPO>0).all(),f"Invalid LMP/MPOs: {result.MPO}"
 
         result.Pgen=pG.X
         result.fpart=fpart.X
@@ -2141,7 +2283,7 @@ class SEDnR(EDnR):
             Cost_of_EDnR+=reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(result.H_p[:,t]+result.H_n[:,t]))
             # buying and selling
             if self.transactive:
-                for j in (self.lenneighbors):
+                for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
                     if result.P_C[j,t]>1e-2:
                         Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
@@ -2188,7 +2330,8 @@ class REDnR(EDnR):
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
         # convierte el resultado Jis
-        J_is=x_dec.EDnRcost
+        # J_is=x_dec.EDnRcost
+        J_is=x_dec.ObjVal # uhhhh
         return x_dec,J_is     
        
     def solve_robust(self,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,grb_verbose=None,BESS_SOE_init=None,**kwargs):
@@ -2369,7 +2512,17 @@ class REDnR(EDnR):
         # Build Result Object
         result=SimpleNamespace()
         result.ObjVal=M.ObjVal
-        result.MPO=self.loadbalanceCtrt.Pi
+        # GETTING THE DUALS MAY BE A BIT HARDER WITH BATTERIES
+        if self.needMPO:
+            try:
+                result.MPO=self.loadbalanceCtrt.Pi
+            except gp.GurobiError as e:
+                self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
+                fixedmodel=M.fixed()
+                fixedmodel.optimize()
+                fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
+                result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
+                assert len(result.MPO)==T and (result.MPO>0).all(),f"Invalid LMP/MPOs: {result.MPO}"
 
         result.Pgen=pG.X
         result.fpart=fpart.X
@@ -2410,7 +2563,7 @@ class REDnR(EDnR):
             Cost_of_EDnR+=reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(result.H_p[:,t]+result.H_n[:,t]))
             # buying and selling
             if self.transactive:
-                for j in (self.lenneighbors):
+                for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
                     if result.P_C[j,t]>1e-2:
                         Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
@@ -2454,7 +2607,8 @@ class DRWEDnR(EDnR):
         x_dec=self.solve_drow(XiScenarioSet,Ximax,Ximin,rwass,DRWEDnRparams,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs) ## ED AND R RESULTS
         if x_dec==-1: return None,-1
         # convierte el resultado Jis
-        J_is=x_dec.EDnRcost
+        # J_is=x_dec.EDnRcost
+        J_is=x_dec.ObjVal # uhhhh
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
         return x_dec,J_is
@@ -2657,15 +2811,16 @@ class DRWEDnR(EDnR):
         result=SimpleNamespace()
         result.ObjVal=M.ObjVal
         # GETTING THE DUALS MAY BE A BIT HARDER IN DROW
-        try:
-            result.MPO=self.loadbalanceCtrt.Pi
-        except gp.GurobiError as e:
-            self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
-            fixedmodel=M.fixed()
-            fixedmodel.optimize()
-            fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
-            result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
-            assert len(result.MPO)==T and (result.MPO>0).all(),"Invalid LMP/MPOs."
+        if self.needMPO:
+            try:
+                result.MPO=self.loadbalanceCtrt.Pi
+            except gp.GurobiError as e:
+                self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
+                fixedmodel=M.fixed()
+                fixedmodel.optimize()
+                fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
+                result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
+                assert len(result.MPO)==T and (result.MPO>0).all(),f"Invalid LMP/MPOs: {result.MPO}"
 
         result.Pgen=pG.X
         result.fpart=fpart.X
@@ -2707,7 +2862,7 @@ class DRWEDnR(EDnR):
             Cost_of_EDnR+=reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(result.H_p[:,t]+result.H_n[:,t]))
             # buying and selling
             if self.transactive:
-                for j in (self.lenneighbors):
+                for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
                     if result.P_C[j,t]>1e-2:
                         Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
@@ -2725,14 +2880,14 @@ class DRWEDnR(EDnR):
 
 # option 3: init ADMM to config
 class ADMMexchange:
-    def __init__(self,MGs:list[MG],method:str,Nsamples:int,ednrparams:list[dict],LastInstanceGens:list[str],
-                 neighbors:dict[int,list[int]],linecosts:float,lineCaps:dict[tuple[int,int],float|int],
-                 rho:float|int,max_iters:int,error_threshold=1E-6,
-                 P_C={}, P_V={},     
-                    z_PC={}, z_PV={},   
-                    lam_C={}, lam_V={}, 
-                    state_init={},
-                 seed=None,logger_level=logging.CRITICAL):
+    def __init__(self,MGs:list[MG],methods:list[str],trainingsamplesets:list,ednrparams:list[dict],
+                neighbors:dict[int,list[int]],linecosts:float,lineCaps:dict[tuple[int,int],float|int],
+                rho:float|int,max_iters:int=1000,error_threshold=1E-6,
+                P_C={}, P_V={},     
+                z_PC={}, z_PV={},   
+                lam_C={}, lam_V={}, 
+                state_init={},
+                logger_level=logging.CRITICAL):
 
         ## INIT LOGGER
         admmlogger=logging.getLogger(__name__)
@@ -2742,17 +2897,18 @@ class ADMMexchange:
         T=24
 
         ## ====== INPUT PARSING AND ASSERTS ===========
-        assert len(MGs)==len(neighbors)==len(ednrparams), "Diff lengths"
+        assert len(MGs)==len(methods)==len(trainingsamplesets)==len(ednrparams)==len(neighbors), "Diff lengths"
 
-        methods={"d":detEDnR,"s":SEDnR,"r":REDnR,"drw":DRWEDnR}
-        assert method in methods,"method should be one of 'd', 's', 'r', 'drw'"
+        methods_avail={"d":detEDnR,"s":SEDnR,"r":REDnR,"drw":DRWEDnR}
+        for m in methods: assert m in methods_avail, "method should be one of 'd', 's', 'r', 'drw'"
         # SELECT SOLVER CLASS
-        xEDnR=methods[method]
+        xEDnR_callers=[methods_avail[m] for m in methods]
 
         # SMALL TEST RUN
         admmlogger.warning("Testing detEDnR with MGs")
         for i,mg in enumerate(MGs):
-            detEDnR(mg,**ednrparams[i]).solve(**ednrparams[i])
+            x,j=detEDnR(mg,**ednrparams[i]).solve(**ednrparams[i])
+            assert j!=-1, f"====TEST FAILED FOR MG{i}==="
         admmlogger.warning("===Test successfull. Initializing MMG===")
 
 
@@ -2819,16 +2975,18 @@ class ADMMexchange:
         ## ====== BUILDING DICT OF AGENTS ======
         agents={}
         solvers=[]
-        Train_Sets=[]
+        # Train_Sets=[]
         for i,mg in enumerate(MGs):
             agentidx=i+1
             admmlogger.info(f"Setting up solver for MG{agentidx}")
-            solvers.append(xEDnR(mg,**ednrparams[i]|ADMMsolverinit[agentidx],
-                             LastInstance=LastInstanceGens[i],model_name=f"MG{agentidx}_{method}"))
-            Train_Sets.append(solvers[i].generateSampleSet(Nsamples))
+            solvers.append(xEDnR_callers[i](mg,**ednrparams[i]|ADMMsolverinit[agentidx],
+                                            model_name=f"MG{agentidx}_{methods[i]}"))
+            # Train_Sets.append(solvers[i].generateSampleSet(Nsamples))
             agents[agentidx]={'solver':solvers[i],
-                         'solverparams': {'trainSampleSet':Train_Sets[i]}|ednrparams[i] }
+                         'solverparams': {'trainSampleSet':trainingsamplesets[i]}|ednrparams[i] }
 
+            admmlogger.info(f"mg.neighbors= {solvers[i].neighbors}")
+        self.solvers=solvers
         # ====== INIT HISTORIAS ======
 
         # DICT OF LISTS, HARDER TO BUILD, EASIER TO PARSE
@@ -2874,8 +3032,9 @@ class ADMMexchange:
                 xdec,jis = solver.solveOrResolve(**params,z_PC=z_PC_i,z_PV=z_PV_i,lambdas_C=lam_C_i,lambdas_V=lam_V_i) 
                 res={"P_C":{(i,j): xdec.P_C[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
                     "P_V":{(i,j): xdec.P_V[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
-                    "state":{'xdec':{}}} # Que guardar para warm start
+                    "state":{'xdec':{"Full EDnResult(...)"}}} # Que guardar para warm start
                 solver.logger.debug(f"res: {res}")
+                res["state"]["xdec"]=xdec
                 # Actualiza P_C y P_V locales del agente i
                 for tup, val in res.get("P_C").items():
                     P_C[tup] = deepcopy(val)
@@ -2991,7 +3150,7 @@ class ADMMexchange:
             
             # Update convergence cond
             # convergenceCondition=False # Añadir condición para e.g. norma de residuo
-            convergenceCondition = ( R_prim['sum']["l2"] <= 1E-6 or R_prim['sum']["linf"] <= error_threshold)
+            convergenceCondition = (max(R_prim['sum']["l2"] , R_prim['sum']["linf"]) <= error_threshold)
             k+=1
 
         self.result = {
