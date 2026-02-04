@@ -1454,16 +1454,21 @@ class EDnR(genericStochasticProgram):
         
     def BoundsFromSet(self,XiScenarioSet,Q):
         """"returns Ximax,Ximin. Q>0. Can be >100"""
+        # self.logger.debug(f"======\nXiScenarioSet : {XiScenarioSet}\n======\n")
         if Q<=0:
             raise Exception("Q>0.")
-        if Q>100:
+        if Q<100:
+            Ximax=np.percentile(XiScenarioSet,50+float(Q)/2,axis=0) # mu + Q/2
+            Ximin=np.percentile(XiScenarioSet,50-float(Q)/2,axis=0) # mu - Q/2
+        else: 
             Ximax=np.max(XiScenarioSet,axis=0)
             Ximin=np.min(XiScenarioSet,axis=0)
-            Ximax+=(Ximax-Ximin)*(float(Q)/100)
-            Ximin-=(Ximax-Ximin)*(float(Q)/100)
-        else: 
-            Ximax=np.percentile(XiScenarioSet,float(Q),axis=0)
-            Ximin=np.percentile(XiScenarioSet,100-float(Q),axis=0)
+            self.logger.info(f"Actual max: {Ximax}")
+            self.logger.info(f"Actual min: {Ximin}")
+            Ximax+=(Ximax-Ximin)*(float(Q)-100)/100 # max + (support)*overQ/100
+            Ximin-=(Ximax-Ximin)*(float(Q)-100)/100 # min - (support)*overQ/100
+        self.logger.info(f"Ximax finally: {Ximax}")
+        self.logger.info(f"Ximin finally: {Ximin}")
         return Ximax,Ximin
  
     def heuristic_reserve(self,customReserve=None,customReg=None,peakSupportedDisconn=0.4,
@@ -1834,8 +1839,7 @@ class detEDnR(EDnR):
         x_dec.EDnRcost=x_dec.EDcost+x_dec.Rcost
         if plot_ED:
             self.plotED(x_dec,**kwargs)   
-        # J_is=x_dec.EDnRcost
-        J_is=x_dec.EDcost+x_dec.Rcost # ObjVal is just EDcost in det
+        J_is=x_dec.EDnRcost # ObjVal is just EDcost in det
         return x_dec,J_is
     
     def detED(self,params={},lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
@@ -2051,7 +2055,7 @@ class SEDnR(EDnR):
             self.plotED(x_dec,**kwargs)  
         # convierte el resultado Jis
         # J_is=x_dec.EDnRcost #nope, this is for Joos
-        J_is=x_dec.ObjVal # uhhhh
+        J_is=x_dec.ObjVal 
         return x_dec,J_is
     
     def solve_stochastic(self,XiScenarioSet,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
@@ -2333,7 +2337,7 @@ class REDnR(EDnR):
             self.plotED(x_dec,**kwargs)  
         # convierte el resultado Jis
         # J_is=x_dec.EDnRcost #nope, this is for Joos
-        J_is=x_dec.ObjVal # uhhhh
+        J_is=x_dec.ObjVal
         return x_dec,J_is     
        
     def solve_robust(self,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,grb_verbose=None,BESS_SOE_init=None,**kwargs):
@@ -2610,7 +2614,7 @@ class DRWEDnR(EDnR):
         if x_dec==-1: return None,-1
         # convierte el resultado Jis
         # J_is=x_dec.EDnRcost #nope, this is for Joos
-        J_is=x_dec.ObjVal # uhhhh
+        J_is=x_dec.ObjVal
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
         return x_dec,J_is
