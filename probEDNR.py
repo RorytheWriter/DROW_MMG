@@ -804,7 +804,7 @@ class EDnR(genericStochasticProgram):
                 return None,-1
         
         # Build Result Data
-        if hasattr(self,'ReserveResult'):
+        if hasattr(self,'ReserveResult'): # Only det has it
             result=SimpleNamespace(**self.ReserveResult.__dict__)                 
         else:
             result=SimpleNamespace()
@@ -862,7 +862,7 @@ class EDnR(genericStochasticProgram):
             if self.HAS_BESS:
                 Cost_of_EDnR+=self.c_chdc_copkwh*pDC_res[t]
             # R+ and R-
-            if not hasattr(result,'Rcost'):
+            if not hasattr(self,'ReserveResult'): #non Det
                 Cost_of_EDnR+=self.reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(result.H_p[:,t]+result.H_n[:,t]))
             # buying and selling
             if self.transactive:
@@ -874,16 +874,18 @@ class EDnR(genericStochasticProgram):
                     if result.P_V[j,t]>1e-2:
                         Cost_of_EDnR-=self.lam_V_k[j,t]*result.P_V[j,t]        
         
-        if hasattr(result,'Rcost'):
+        if hasattr(self,'ReserveResult'): #just for det
             result.EDcost=Cost_of_EDnR
             result.EDnRcost=result.EDcost+result.Rcost
+            Jis=result.EDnRcost
         else:
+            Jis=result.ObjVal
             result.EDnRcost=Cost_of_EDnR
     
         if plot_ED:
             self.plotED(result,**kwargs)            
         # return result,result.EDnRcost #x_dec,Jis
-        return result,result.ObjVal #x_dec,Jis # uhhh
+        return result,Jis
 
     # For logically plotting SOE
     @staticmethod
@@ -1464,7 +1466,7 @@ class EDnR(genericStochasticProgram):
             Ximin=np.percentile(XiScenarioSet,100-float(Q),axis=0)
         return Ximax,Ximin
  
-    def heuristic_reserve(self,customReserve=None,customReg=None,peakSupportedDisconn=0.6,
+    def heuristic_reserve(self,customReserve=None,customReg=None,peakSupportedDisconn=0.4,
                           f_hi=62,f_low=58.5,fpart_bess=None,Type3GenFactor=0.5,
                         Res_verbose=False,T_RB_dc_h=2,T_RB_ch_h=2,**kwargs):
         """Solve deterministic EDnR. Returns Reserve decision object
@@ -1833,7 +1835,7 @@ class detEDnR(EDnR):
         if plot_ED:
             self.plotED(x_dec,**kwargs)   
         # J_is=x_dec.EDnRcost
-        J_is=x_dec.ObjVal # uhhhh
+        J_is=x_dec.EDcost+x_dec.Rcost # ObjVal is just EDcost in det
         return x_dec,J_is
     
     def detED(self,params={},lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
@@ -2048,7 +2050,7 @@ class SEDnR(EDnR):
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
         # convierte el resultado Jis
-        # J_is=x_dec.EDnRcost
+        # J_is=x_dec.EDnRcost #nope, this is for Joos
         J_is=x_dec.ObjVal # uhhhh
         return x_dec,J_is
     
@@ -2330,7 +2332,7 @@ class REDnR(EDnR):
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
         # convierte el resultado Jis
-        # J_is=x_dec.EDnRcost
+        # J_is=x_dec.EDnRcost #nope, this is for Joos
         J_is=x_dec.ObjVal # uhhhh
         return x_dec,J_is     
        
@@ -2607,7 +2609,7 @@ class DRWEDnR(EDnR):
         x_dec=self.solve_drow(XiScenarioSet,Ximax,Ximin,rwass,DRWEDnRparams,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs) ## ED AND R RESULTS
         if x_dec==-1: return None,-1
         # convierte el resultado Jis
-        # J_is=x_dec.EDnRcost
+        # J_is=x_dec.EDnRcost #nope, this is for Joos
         J_is=x_dec.ObjVal # uhhhh
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
