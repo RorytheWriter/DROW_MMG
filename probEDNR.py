@@ -706,7 +706,7 @@ class EDnR(genericStochasticProgram):
             #  PrViol is always a vector
             return x_dec,Jis,Joos,reliability,PrViol
         else:
-            return None,-1,-1,0,1
+            return None,-1,-1,0,1 # will never happen btw, solveOrResolve always retries or raises Exception
     
     def resolve(self,hassamplectrt:bool,trainSampleSet=None,Q=None,rwass=None,
                        lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,dontupdateTrainSample=False,**kwargs):
@@ -785,9 +785,6 @@ class EDnR(genericStochasticProgram):
         self.logger.info("solving...")
         try:
             self.M.optimize()
-            for i in range(10000):
-                continue
-
         except gp.GurobiError as e:
             self.logger.error(f"Uhhh something happened: {e}")
             self.logger.error(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
@@ -795,10 +792,10 @@ class EDnR(genericStochasticProgram):
             return None,-1
         self.sol_time.append(self.M.Runtime)
         if self.M.status==GRB.OPTIMAL:
-            self.logger.info(f"ED solved optimally in {self.M.Runtime:.2f} seconds; ObjVal: {self.M.ObjVal}")
+            self.logger.info(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
             self.hasBeenSolved=True
         else:
-            logging.warning(f"ED not solved optimally. Status: {self.M.status}")
+            logging.error(f"ED not solved optimally. Status: {self.M.status}")
             try:
                 self.M.computeIIS()
                 self.M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
