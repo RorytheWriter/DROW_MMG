@@ -277,7 +277,7 @@ class genericStochasticProgram:
         # self.logger.critical(f"paramrange: {paramRange}")
 
         for i,dataset in enumerate(trainSampleSets):
-            self.logger.warning(f"=== Experiment Set #{i} ===")
+            self.logger.error(f"=== Experiment Set #{i} ===")
             yield self.simulate(dataset,testSampleSet,paramRange)
     ###################
 
@@ -318,7 +318,7 @@ class genericStochasticProgram:
         """
         for i,params in enumerate(paramRange):
             # yields a tuple ( , , , []) for every p
-            self.logger.warning(f"=== Params[{i}] : {params} ===")
+            self.logger.error(f"=== Params[{i}] : {params} ===")
             yield self.simulate_over_samples(trainSampleSets,testSampleSet,params)
 
     ###################
@@ -706,7 +706,7 @@ class EDnR(genericStochasticProgram):
             #  PrViol is always a vector
             return x_dec,Jis,Joos,reliability,PrViol
         else:
-            return None,-1,-1,0,1 # will never happen btw, solveOrResolve always retries or raises Exception
+            return None,-1,-1,0,1
     
     def resolve(self,hassamplectrt:bool,trainSampleSet=None,Q=None,rwass=None,
                        lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,dontupdateTrainSample=False,**kwargs):
@@ -785,6 +785,9 @@ class EDnR(genericStochasticProgram):
         self.logger.info("solving...")
         try:
             self.M.optimize()
+            for i in range(10000):
+                continue
+
         except gp.GurobiError as e:
             self.logger.error(f"Uhhh something happened: {e}")
             self.logger.error(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
@@ -792,10 +795,10 @@ class EDnR(genericStochasticProgram):
             return None,-1
         self.sol_time.append(self.M.Runtime)
         if self.M.status==GRB.OPTIMAL:
-            self.logger.info(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
+            self.logger.info(f"ED solved optimally in {self.M.Runtime:.2f} seconds; ObjVal: {self.M.ObjVal}")
             self.hasBeenSolved=True
         else:
-            logging.error(f"ED not solved optimally. Status: {self.M.status}")
+            logging.warning(f"ED not solved optimally. Status: {self.M.status}")
             try:
                 self.M.computeIIS()
                 self.M.write(f"GRB_IIS/model_{self.M.ModelName}_{datetime.strftime(datetime.today(),"%H%M%S")}.ilp")
@@ -1626,7 +1629,7 @@ class EDnR(genericStochasticProgram):
                     'p_ch_max_bess_kw':p_ch_max_bess_kw,
                     'minSOE_perc':minSOE_perc,
                     'maxSOE_perc':maxSOE_perc}
-            self.logger.warning(f"{minSOE_perc:.2%} <= SOE <= {maxSOE_perc:.2%}")
+            if Res_verbose: self.logger.warning(f"{minSOE_perc:.2%} <= SOE <= {maxSOE_perc:.2%}")
                     
         if Res_verbose:
             self.logger.warning(f"For {[g.type for g in self.MG.Gens]+self.HAS_BESS*["BESS"]}")
@@ -1920,12 +1923,13 @@ class detEDnR(EDnR):
                 self.lam_C_k=lambdas_C
                 self.lam_V_k=lambdas_V
                 # Add P compras and P ventas variables to model
-                P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=np.zeros((self.lenneighbors,T)),ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
-                P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=np.zeros((self.lenneighbors,T)),ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
+                P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
+                P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
                 
                 # Add ADMM params as variables == constant RHS to update in resolve()
                 z_PC_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
                 z_PV_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
+                
                 self.z_PC_ctrt=M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
                 self.z_PV_ctrt=M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
                 
@@ -1934,19 +1938,20 @@ class detEDnR(EDnR):
                 self.lam_C_ctrt=M.addConstr(lam_C_var==self.lam_C_k,"lam_C_const")
                 self.lam_V_ctrt=M.addConstr(lam_V_var==self.lam_V_k,"lam_V_const")
                 
-            for t in range(T):
-                for j in range(self.lenneighbors): #list of MG indices
-                    ### METER INTERCAMBIOS EN FUNCION OBJETIVO
-                    self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C[j,t]-lam_C_var[j,t]*P_V[j,t]
-                    self.fobj+=(self.rho/2)*((P_C[j,t]-z_PC_var[j,t])*(P_C[j,t]-z_PC_var[j,t])+(P_V[j,t]-z_PV_var[j,t])*(P_V[j,t]-z_PV_var[j,t]))
-            self.P_C=P_C
-            self.P_V=P_V
+                for t in range(T):
+                    for j in range(self.lenneighbors): #list of MG indices
+                        ### METER INTERCAMBIOS EN FUNCION OBJETIVO
+                        self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C[j,t]-lam_C_var[j,t]*P_V[j,t]
+                        self.fobj+=(self.rho/2)*((P_C[j,t]-z_PC_var[j,t])*(P_C[j,t]-z_PC_var[j,t])+(P_V[j,t]-z_PV_var[j,t])*(P_V[j,t]-z_PV_var[j,t]))
+                self.P_C=P_C
+                self.P_V=P_V
             ### METER INTERCAMBIOS EN BALANCE DE CARGA
             GenBal+=P_C.sum(axis=0)-P_V.sum(axis=0)
         
         ### LOAD BALANCE CONSTRAINT
         self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
-                    
+        
+        M.Params.QCPDual=1
         M.setObjective(self.fobj, GRB.MINIMIZE)
         self.logger.debug("solving...")
         try:
@@ -1958,7 +1963,7 @@ class detEDnR(EDnR):
             return -1
         self.sol_time.append(M.Runtime)
         if M.status==GRB.OPTIMAL:
-            self.logger.debug(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
+            self.logger.info(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
             self.hasBeenSolved=True
         else:
             logging.warning(f"ED not solved optimally. Status: {self.M.status}")
@@ -2197,6 +2202,7 @@ class SEDnR(EDnR):
                 # Add ADMM params as variables == constant RHS to update in resolve()
                 z_PC_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
                 z_PV_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
+                
                 self.z_PC_ctrt=M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
                 self.z_PV_ctrt=M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
                 
@@ -2217,7 +2223,8 @@ class SEDnR(EDnR):
         
         ### LOAD BALANCE CONSTRAINT
         self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
-                     
+        
+        M.Params.QCPDual=1        
         M.setObjective(self.fobj, GRB.MINIMIZE)
         self.logger.debug("solving...")
         try:
@@ -2229,7 +2236,7 @@ class SEDnR(EDnR):
             return -1
         self.sol_time.append(M.Runtime)
         if M.status==GRB.OPTIMAL:
-            self.logger.debug(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
+            self.logger.info(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
             self.hasBeenSolved=True
         else:
             logging.warning(f"ED not solved optimally. Status: {self.M.status}")
@@ -2477,6 +2484,7 @@ class REDnR(EDnR):
                 # Add ADMM params as variables == constant RHS to update in resolve()
                 z_PC_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
                 z_PV_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
+                
                 self.z_PC_ctrt=M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
                 self.z_PV_ctrt=M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
                 
@@ -2497,7 +2505,8 @@ class REDnR(EDnR):
                   
         ### LOAD BALANCE CONSTRAINT
         self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
-                     
+
+        M.Params.QCPDual=1
         M.setObjective(self.fobj, GRB.MINIMIZE)
         self.logger.debug("solving...")
         try:
@@ -2509,7 +2518,7 @@ class REDnR(EDnR):
             return -1
         self.sol_time.append(M.Runtime)
         if M.status==GRB.OPTIMAL:
-            self.logger.debug(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
+            self.logger.info(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
             self.hasBeenSolved=True
         else:
             logging.warning(f"ED not solved optimally. Status: {self.M.status}")
@@ -2807,7 +2816,7 @@ class DRWEDnR(EDnR):
             return -1
         self.sol_time.append(M.Runtime)
         if M.status==GRB.OPTIMAL:
-            self.logger.debug(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
+            self.logger.info(f"ED solved optimally in {self.M.Runtime:.2f} seconds")
             self.hasBeenSolved=True
         else:
             logging.warning(f"ED not solved optimally. Status: {self.M.status}")
