@@ -16,6 +16,7 @@ import yaml
 # import xarray as xr
 from datetime import datetime
 import logging
+import sys
 
 from contextlib import contextmanager
 import time
@@ -30,11 +31,11 @@ if (__name__=="__main__"):
 @contextmanager
 def timed(title:str,logger:logging.Logger,show=True): # with timed(): ...
     start_time = time.time()
+    if show: logger.info(f"====== starting: {title} ======")
     yield # returns a generator!
     end_time = time.time()
     diff=end_time-start_time
-    if show:
-        logger.warning(f'====== {title} took: {diff*1000:.2f} ms ======')
+    if show: logger.warning(f'====== {title} took: {diff*1000:.2f} ms ======')
 
 def vectoprint(arr,n=1,perc=False):
     s="%" if perc else "f"
@@ -155,10 +156,11 @@ class genericStochasticProgram:
         self.logger = logging.getLogger(__name__)
         fmt_strs=["> %(message)s",
                  "[%(lineno)2s - %(funcName)2s] %(message)s",
-                 "[%(filename)2s:%(lineno)2s - %(funcName)2s()] %(message)s"]
-        logging.basicConfig(format=fmt_strs[logger_scope])
+                 "[%(lineno)2s - %(levelname)-4s - %(funcName)2s] %(message)s"]
+        logging.basicConfig(format=fmt_strs[logger_scope],stream=sys.stdout)
         self.logger.setLevel(logger_level)
         self.hasBeenSolved=False
+        self.showtimed=False
         """
         Generic program optimizing J(x,xi). Takes a training sample {Xi_in},
         makes a decision x_dec=argmin(SP), with expected in-sample cost Jis=min(SP).
@@ -211,14 +213,14 @@ class genericStochasticProgram:
         """
 
         if not self.hasBeenSolved:
-            with timed("solveTest calling solve()",self.logger):
+            with timed("solveTest calling solve()",self.logger,self.showtimed):
                 x_dec,Jis=self.solve(trainSampleSet,**kwargs)
         else:
-            with timed("solveTest calling resolve()",self.logger):
+            with timed("solveTest calling resolve()",self.logger,self.showtimed):
                 x_dec,Jis=self.resolve(trainSampleSet,**kwargs)
         
         # Whether solved or resolved, test the decision
-        with timed("solveTest calling Joos()",self.logger):
+        with timed("solveTest calling Joos()",self.logger,self.showtimed):
             Joos,PrViol=self.Joos(x_dec,testSampleSet)
         reliability=float((Joos<=Jis))
         self.logger.info(f"Jis: {Jis}")
@@ -259,7 +261,7 @@ class genericStochasticProgram:
         Jis=list(Jis)
         Joos=list(Joos)
         rel=list(rel)
-        prviol=list(prviol)
+        prviol=list(prviol)            
         self.logger.info(f"Joos: {Joos}")
         self.logger.info(f"Jis: {Jis}")
         self.logger.info(f"prviol: {prviol}")
@@ -606,62 +608,53 @@ class EDnR(genericStochasticProgram):
         """
         fullretry=kwargs.get("fullretry",False)
         if fullretry: self.logger.warning("===== Doing a fullretry =====")
-        
+        self.logger.info(f"kwargs passed: {kwargs}")
+
         if not fullretry and not self.hasBeenSolved:
             self.logger.warning("Solving for the 1st time.")
-            self.logger.info("Currently:")
-            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
-            with timed("solveOrResolve calling solve(), first time",self.logger):
+            self.logger.info(f"Currently: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            with timed("solveOrResolve calling solve(), first time",self.logger,self.showtimed):
                 x_dec,Jis=self.solve(trainSampleSet,**kwargs)
-            self.logger.info("After 1st Solve:")
-            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            self.logger.info(f"After 1st Solve: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
 
         elif not fullretry and not hasattr(self,'samplectrt'):
             self.logger.warning("Resolving. No sample ctrt.")
-            self.logger.info("Currently:")
-            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
-            with timed("solveOrResolve calling resolve(), no sampl ctrt",self.logger):
+            self.logger.info(f"Currently: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            with timed("solveOrResolve calling resolve(), no sampl ctrt",self.logger,self.showtimed):
                 x_dec,Jis=self.resolve(False,trainSampleSet,**kwargs)
-            self.logger.info("After resolve:")
-            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            self.logger.info(f"After resolve: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
 
         elif not fullretry and (self.samplectrt.RHS.shape[0]==len(trainSampleSet)):
             self.logger.debug(f"samplctrt is={self.samplectrt.RHS.shape}, given set len={len(trainSampleSet)}")
             if dontupdateTrainSample: self.logger.warning("Not updating trainSample, only other params")
             else: self.logger.warning("Resolving, updating samplectrt and/or other params.")
-            self.logger.info("Currently:")
-            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
-            with timed("solveOrResolve calling resolve(), updating sampl ctrt",self.logger):
+            self.logger.info(f"Currently: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            with timed("solveOrResolve calling resolve(), updating sampl ctrt",self.logger,self.showtimed):
                 x_dec,Jis=self.resolve(True,trainSampleSet,dontupdateTrainSample=dontupdateTrainSample,**kwargs) 
-            self.logger.info("After resolve:")
-            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            self.logger.info(f"After resolve: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
                
         else:
             if hasattr(self,'samplectrt'):
                 self.logger.debug(f"samplctrt={self.samplectrt.RHS.shape}, given set={len(trainSampleSet)}")
             self.logger.warning("Recreating whole model and solving.")
-            self.logger.info("Currently:")
-            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            self.logger.info(f"Currently: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
             # Recreate Gurobi Model
-            with timed("solveOrResolve recreating model and calling solve()",self.logger):
+            with timed("solveOrResolve recreating model and calling solve()",self.logger,self.showtimed):
             
                 self.M.remove(self.M.getVars())
                 self.M.remove(self.M.getConstrs())
                 self.M.remove(self.M.getGenConstrs())
                 self.M.update()
-                self.logger.info("After deletion:")
-                self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+                self.logger.info(f"After deletion: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
                 
                 self.M=self.CreateModel(**kwargs)
                 self.M.update()
-                self.logger.info("After creation+update:")
-                self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+                self.logger.info(f"After creation+update: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
                 
                 # self.sol_time=[]
                 x_dec,Jis=self.solve(trainSampleSet,**kwargs)
               
-            self.logger.info("After new solve:")
-            self.logger.info(f"{self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
+            self.logger.info(f"After new solve: {self.M.NumVars} Vars, {self.M.NumNZs} Num NZs, {self.M.NumConstrs} Constraints, {self.M.NumQConstrs} QConstrts, {self.M.NumGenConstrs} GenCtrts, {self.M.NumBinVars} BinVars, {self.M.NumSOS} SOSCtrts")
 
             ## Remember i shouldnt do:
             # self.M.remove(self.samplectrt)
@@ -680,15 +673,18 @@ class EDnR(genericStochasticProgram):
                     kwargs["fpart_bess"]=np.round(self.fpart_bess*0.8,3)
                 
                 cresrv=self.customReserve
-                if min(cresrv["up"],cresrv["down"])>self.peak_demand_kw:
-                    raise Exception(f"Retry with different params. kwargs: {kwargs} ")
-                
+                if min(cresrv["up"],cresrv["down"])>self.peak_demand_kw*4:
+                    raise Exception(f"UNFEASIBLE. Retry with different params. Currently: {kwargs} ")
+                    # self.logger.critical(f"===== UNFEASIBLE =====\nCurrent kwargs: {kwargs}")
+                    # return None,-1
+                    
                 kwargs["customReserve"]={"up":np.round(cresrv["up"]*1.2,0),
                                             "down":np.round(cresrv["down"]*1.2,0)}
                 kwargs["fullretry"]=True
                 self.logger.critical(f"RETRYING WITH KWARGS: {kwargs}")
                 x_dec,Jis=self.solveOrResolve(trainSampleSet,**kwargs)
 
+        self.logger.info(f"Finally, Jis: {Jis:,.0f}")
         return x_dec,Jis
 
 
@@ -697,17 +693,20 @@ class EDnR(genericStochasticProgram):
         Calls solveOrResolve(), gets decisions x_dec from trainSampleSet, tests its performance with Joos() over testSampleSet.
         Returns (x_dec, Jis, Joos, reliability, PrViol) point [corresponding to given trainSampleSet Xi_hat]
         """
-        with timed("solveTest calling solveOrResolve()",self.logger):
+        with timed("solveTest calling solveOrResolve()",self.logger,True):
             x_dec,Jis=self.solveOrResolve(trainSampleSet,**kwargs)
         # Whether solved or resolved, test the decision
-        with timed("solveTest calling Joos()",self.logger):
-            Joos,PrViol=self.Joos(x_dec,testSampleSet,**kwargs)
-        reliability=float(Joos<=Jis)
-        self.logger.info(f"Jis: {Jis}")
-        self.logger.info(f"prvio: {PrViol}")
-        self.logger.info(f"rel: {reliability}")
-        #  PrViol is always a vector
-        return x_dec,Jis,Joos,reliability,PrViol
+        if x_dec is not None:
+            with timed("solveTest calling Joos()",self.logger,True):
+                Joos,PrViol=self.Joos(x_dec,testSampleSet,**kwargs)
+            reliability=float(Joos<=Jis)
+            self.logger.info(f"Jis: {Jis}")
+            self.logger.info(f"prvio: {PrViol}")
+            self.logger.info(f"rel: {reliability}")
+            #  PrViol is always a vector
+            return x_dec,Jis,Joos,reliability,PrViol
+        else:
+            return None,-1,-1,0,1 # will never happen btw, solveOrResolve always retries or raises Exception
     
     def resolve(self,hassamplectrt:bool,trainSampleSet=None,Q=None,rwass=None,
                        lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,dontupdateTrainSample=False,**kwargs):
@@ -717,7 +716,7 @@ class EDnR(genericStochasticProgram):
         Then, does M.optimize(), gets result
         
         """
-        if not self.hasBeenSolved: # will never happen btw
+        if not self.hasBeenSolved: # must never happen btw
             raise Exception("Instance must be solved once with solve() before resolve() can be called") 
         
 
@@ -752,10 +751,13 @@ class EDnR(genericStochasticProgram):
                 raise Exception("Cannot update Q.")
             self.logger.info(f"updating Q: {Q}")
             Ximax,Ximin=self.BoundsFromSet(XiScenarioSet,Q)                
-            self.logger.debug(f"updating Ximax to :{Ximax}")
-            self.logger.debug(f"updating Ximin to :{Ximin}")
+            self.logger.info(f"Prev Ximax :{self.ximaxCtrt.RHS}")
+            self.logger.info(f"Prev Ximin :{self.ximinCtrt.RHS}")
             self.ximaxCtrt.RHS=Ximax
             self.ximinCtrt.RHS=Ximin
+            self.M.update()
+            self.logger.info(f"updated Ximax to :{self.ximaxCtrt.RHS}")
+            self.logger.info(f"updated Ximin to :{self.ximinCtrt.RHS}")
         
         if rwass is not None:
             if not hasattr(self,'rwass_ctrt'):
@@ -1463,10 +1465,11 @@ class EDnR(genericStochasticProgram):
         else: 
             Ximax=np.max(XiScenarioSet,axis=0)
             Ximin=np.min(XiScenarioSet,axis=0)
-            self.logger.info(f"Actual max: {Ximax}")
-            self.logger.info(f"Actual min: {Ximin}")
-            Ximax+=(Ximax-Ximin)*(float(Q)-100)/100 # max + (support)*overQ/100
-            Ximin-=(Ximax-Ximin)*(float(Q)-100)/100 # min - (support)*overQ/100
+            self.logger.debug(f"Actual max: {Ximax}")
+            self.logger.debug(f"Actual min: {Ximin}")
+            P50support=np.percentile(XiScenarioSet,75,axis=0) - np.percentile(XiScenarioSet,25,axis=0)
+            Ximax += P50support*(float(Q)-100)/100 # max + (P50support)*overQ/100
+            Ximin -= P50support*(float(Q)-100)/100 # min - (P50support)*overQ/100
         self.logger.info(f"Ximax finally: {Ximax}")
         self.logger.info(f"Ximin finally: {Ximin}")
         return Ximax,Ximin
@@ -1564,6 +1567,10 @@ class EDnR(genericStochasticProgram):
             # 3.2. Definir Holguras/Margenes de Reserva rounded a 1kW (para eliminar Holgura Tipo 2)
             H_n=np.round([ResdownTotal*f for f in fpart],0)
             H_p=np.round([ResupTotal*f for f in fpart],0)
+            for i,g in enumerate(self.MG.Gens):
+                Gcap = sum(g.power_perunit_kw)
+                assert Gcap > H_p[i], f"Unfeasible R+: {H_p[i]} for {g.type}, Pmax: {Gcap}"
+                assert Gcap > H_n[i], f"Unfeasible R-: {H_n[i]} for {g.type}, Pmax: {Gcap}"
             # Y recalcular ResupTotal y ResdownTotal en consecuencia
             ResupTotal=np.sum(H_p)
             ResdownTotal=np.sum(H_n)
@@ -2106,14 +2113,14 @@ class SEDnR(EDnR):
         self.fpart=fpart
         
         ## RESERVE CONSTRAINTS
-        self.logger.debug(f"ximin: {Ximin}, ximax={Ximax}")
+        # self.logger.debug(f"ximin: {Ximin}, ximax={Ximax}")
         self.ximinCtrt=M.addConstr(ximin_v==Ximin,"ximinctrt")
         self.ximaxCtrt=M.addConstr(ximax_v==Ximax,"ximaxctrt")
         fpartis1=M.addConstrs((fpart[:,t].sum()==1 for t in range(T)),"fpartis1") # sum of participation factors is 1 at each t
         RpandPGenLim=M.addConstrs((p_gmin_kw_mtx[:,t]<=pG[:,t]-Rn[:self.Ngen,t] for t in range(T)),"RpandPGenLim")
         RnandPGenLim=M.addConstrs((pG[:,t]+Rp[:self.Ngen,t]<=p_gmax_kw_mtx[:,t] for t in range(T)),"RnandPGenLim")
-        fpartximax=M.addConstrs((fpart[:,t]*Ximax[t]<=Rn[:,t] for t in range(T)),"fpartximax")
-        fpartximin=M.addConstrs((-fpart[:,t]*Ximin[t]<=Rp[:,t] for t in range(T)),"fpartximin")
+        fpartximax=M.addConstrs((fpart[:,t]*ximax_v[t]<=Rn[:,t] for t in range(T)),"fpartximax")
+        fpartximin=M.addConstrs((-fpart[:,t]*ximin_v[t]<=Rp[:,t] for t in range(T)),"fpartximin")
         
         # Full costs vector Gens+BESS
         c_gen_copkwh_w_bess=self.c_gen_copkwh
@@ -2386,14 +2393,14 @@ class REDnR(EDnR):
         self.fpart=fpart
         
         ## RESERVE CONSTRAINTS
-        self.logger.debug(f"ximin: {Ximin}, ximax={Ximax}")
+        # self.logger.debug(f"ximin: {Ximin}, ximax={Ximax}")
         self.ximinCtrt=M.addConstr(ximin_v==Ximin,"ximinctrt")
         self.ximaxCtrt=M.addConstr(ximax_v==Ximax,"ximaxctrt")
         fpartis1=M.addConstrs((fpart[:,t].sum()==1 for t in range(T)),"fpartis1") # sum of participation factors is 1 at each t
         RpandPGenLim=M.addConstrs((p_gmin_kw_mtx[:,t]<=pG[:,t]-Rn[:self.Ngen,t] for t in range(T)),"RpandPGenLim")
         RnandPGenLim=M.addConstrs((pG[:,t]+Rp[:self.Ngen,t]<=p_gmax_kw_mtx[:,t] for t in range(T)),"RnandPGenLim")
-        fpartximax=M.addConstrs((fpart[:,t]*Ximax[t]<=Rn[:,t] for t in range(T)),"fpartximax")
-        fpartximin=M.addConstrs((-fpart[:,t]*Ximin[t]<=Rp[:,t] for t in range(T)),"fpartximin")
+        fpartximax=M.addConstrs((fpart[:,t]*ximax_v[t]<=Rn[:,t] for t in range(T)),"fpartximax")
+        fpartximin=M.addConstrs((-fpart[:,t]*ximin_v[t]<=Rp[:,t] for t in range(T)),"fpartximin")
         
         # Full costs vector Gens+BESS
         c_gen_copkwh_w_bess=self.c_gen_copkwh
@@ -2667,14 +2674,14 @@ class DRWEDnR(EDnR):
         self.fpart=fpart
         
         ## RESERVE CONSTRAINTS
-        self.logger.debug(f"ximin: {Ximin}, ximax={Ximax}")
+        # self.logger.debug(f"ximin: {Ximin}, ximax={Ximax}")
         self.ximinCtrt=M.addConstr(ximin_v==Ximin,"ximinctrt")
         self.ximaxCtrt=M.addConstr(ximax_v==Ximax,"ximaxctrt")
         fpartis1=M.addConstrs((fpart[:,t].sum()==1 for t in range(T)),"fpartis1") # sum of participation factors is 1 at each t
         RpandPGenLim=M.addConstrs((p_gmin_kw_mtx[:,t]<=pG[:,t]-Rn[:self.Ngen,t] for t in range(T)),"RpandPGenLim")
         RnandPGenLim=M.addConstrs((pG[:,t]+Rp[:self.Ngen,t]<=p_gmax_kw_mtx[:,t] for t in range(T)),"RnandPGenLim")
-        fpartximax=M.addConstrs((fpart[:,t]*Ximax[t]<=Rn[:,t] for t in range(T)),"fpartximax")
-        fpartximin=M.addConstrs((-fpart[:,t]*Ximin[t]<=Rp[:,t] for t in range(T)),"fpartximin")
+        fpartximax=M.addConstrs((fpart[:,t]*ximax_v[t]<=Rn[:,t] for t in range(T)),"fpartximax")
+        fpartximin=M.addConstrs((-fpart[:,t]*ximin_v[t]<=Rp[:,t] for t in range(T)),"fpartximin")
  
         # Full costs vector Gens+BESS
         c_gen_copkwh_w_bess=self.c_gen_copkwh
@@ -2897,7 +2904,7 @@ class ADMMexchange:
 
         ## INIT LOGGER
         admmlogger=logging.getLogger(__name__)
-        logging.basicConfig(format="[%(lineno)2s - %(funcName)2s] %(message)s")
+        logging.basicConfig(format="[%(lineno)2s - %(funcName)2s] %(message)s",stream=sys.stdout)
         admmlogger.setLevel(logger_level)
         self.admmlogger=admmlogger
         T=24
