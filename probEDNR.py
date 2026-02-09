@@ -412,42 +412,44 @@ class EDnR(genericStochasticProgram):
                  plotcolors=None,seed=None,grb_verbose:bool=False,logger_scope:int=1,
                  logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,needMPO:bool=False,**kwargs):
         """
-        Generic Economic Dispatch with Reserve Wrapper Class Init.
-        
-        :param quirk:
-            [DateHour] string. Custom name for specific setup.
-        :param grb_verbose:
-            False. Show Gurobi output for ED
-        :param strictlycircularbess:
-            True. BESS in ED has circular dynamics (0:00=24:00). Generator UR/DR are always treated as circular.
-        :param BESS_SOE_init:
-            0. If BESS is not circular, starting SOE (in %)
-        :param xi_hat: 
-            Dummy Numpy zeros 2x2. Input training sample (Nsamples x Dimension)
-        :param seed:
-            None. Rng seed.
+        :param MG:
+            (MG). Microgrid to use.
         :param subperiods:
-            30. Number of Operation intrahour subperiods.
+            (int, optional) Defaults to 30. Number of Operation intrahour subperiods.
+        :param strictlycircularbess:
+            (bool, optional) Defaults to True. BESS in ED has circular dynamics (0:00=24:00). Generator UR/DR are always treated as circular.
+        :param BESS_SOE_init:
+            (float, optional) Defaults to 0.0. If BESS is not circular, starting SOE (in %)
         :param plotcolors:
-            'Set1'. One of matplotlib.colormaps (name string)
+            (string, optional) Defaults to 'Set1'. One of matplotlib.colormaps (name string)
+        :param seed:
+            (Any, optional) Defaults to None. Rng seed.
+        :param grb_verbose:
+            (bool, optional) Defaults to False. Show Gurobi output.
+        :param logger_scope:
+            (int, optional) Defaults to 1. Show function name in logger string.
+        :param logger_level:
+            (int, optional) Defaults to logging.CRITICAL.
+        :param LastInstance:
+            (string, optional) Defaults to None. Name of Last Instance Gen.
+        :param model_name:
+            (string, optional) Defaults to DateHour. nName of Gurobi Model for setup.
+        :param needMPO:
+            (bool, optional) Defaults to False. Set True to be able to calculate MPO in solve().
         :param transactive:
-            False. Set True for ADMM  
-        :param neighbors:
-            empty list, len=lenneighbors. For ADMM
+            (bool, optional) Defaults to 0. Set True for ADMM.
         :param rho:
-            float. For ADMM
+            (float, optional) Defaults to 1. For ADMM.
+        :param neighbors:
+            (list, optional) Defaults to empty list. For ADMM.
         :param lineCapacities:
-            0 list, len=lenneighbors. For ADMM
+            (list, optional) Defaults to list of 0 of len=lenneighbors. For ADMM
         :param lineCosts:
-            float. For ADMM
-        :param z_PC_k:
-            0 list, len=lenneighbors. For ADMM
-        :param z_PV_k:
-            0 list, len=lenneighbors. For ADMM
-        :param lam_C_k:
-            0 list, len=lenneighbors. For ADMM
-        :param lam_V_k:
-            0 list, len=lenneighbors. For ADMM
+            (float, optional). For ADMM
+        :param z_PC_k,z_PV_k,lam_C_k,lam_V_k:
+            (float, optional) Defaults to list of 0 of len=lenneighbors. 0th iteration For ADMM.
+        :param xi_hat:
+            (NDarray, optional) Defaults to dummy zeros matrix. Input training sample (Nsamples x Dimension).
         """
         super().__init__(logger_scope=logger_scope,logger_level=logger_level)
         self.MG=deepcopy(MG) # deepcopy to avoid modifying original MG
@@ -889,10 +891,12 @@ class EDnR(genericStochasticProgram):
         # return result,result.EDnRcost #x_dec,Jis
         return result,Jis
 
-    # For logically plotting SOE
-    @staticmethod
-    def SOEvectoplot(vec):
-        return np.append(np.roll(vec,1),vec[-1])
+    # For plotting SOE logically
+    def SOEvectoplot(self,vec):
+        if self.strictlycircularbess:
+            return np.append(np.roll(vec,1),vec[-1])
+        else:
+            return np.array([self.BESS_SOE_init*self.CE_bess_kwh]+list(vec))
     
     # def randomizeDemand(self,sigma_day=0.01,sigma_period=0.01,sigma_fast=0.02,window=12,**kwargs):
     # def randomizeDemand(self,sigma_day=0.08,sigma_period=0.08,sigma_fast=0.08,window=12,**kwargs):
@@ -1477,18 +1481,31 @@ class EDnR(genericStochasticProgram):
     def heuristic_reserve(self,customReserve=None,customReg=None,peakSupportedDisconn=0.4,
                           f_hi=62,f_low=58.5,fpart_bess=None,Type3GenFactor=0.5,
                         Res_verbose=False,T_RB_dc_h=2,T_RB_ch_h=2,**kwargs):
-        """Solve deterministic EDnR. Returns Reserve decision object
-        with {fpart,ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,Rcost}.
+        """
+            :param customReserve:
+              ({'up'=float,'down':float}, optional) Defaults to None. Custom Total MG Reserve.
+            :param customReg:
+              (list, optional) Defaults to None. List of custom Regulation constants [Hz/kW] list of Ngens.
+            :param peakSupportedDisconn:
+              (float, optional) Defaults to 0.4. % of Peak Demand disconnected supported to calculate ResT+.
+            :param f_hi:
+              (float, optional) Defaults to 62.
+            :param f_low:
+              (float, optional) Defaults to 58.5.
+            :param fpart_bess:
+              (float, optional) Defaults to None. (Initial) Participation Factor used for BESS. If None, rule of thumb proportional to CapB/PeakDem cut btwn [0.1,0.5].
+            :param Type3GenFactor:
+              (float, optional) Defaults to 0.5. Intermittent Dispatchable gens get assigned [Type3GenFactor] times less Reserve than Type0/1 (rescaled).
+            :param Res_verbose:
+              (bool, optional) Defaults to False. Log results. Logger level should be <=WARNING
+            :param T_RB_dc_h:
+              (int, optional) Defaults to 2. Time to calculate SOE min.
+            :param T_RB_ch_h:
+              (int, optional) Defaults to 2. Time to calculate SOE max.
         
-        **R kwargs:**
-            customReserve=None,customReg=None,peakSupportedDisconn=0.4,f_hi=62,f_low=58.5,
-            fpart_bess=None,Type3GenFactor=0.5,
-            Res_verbose=False,T_RB_dc_h=0.5,T_RB_ch_h=0.5
-        
-        **ED kwargs:**
-            plot_ED=False,EDplotstyle='stack',stackalpha=0.7,grb_verbose=None,BESS_SOE_init=None
-            """
-        
+        Returns    
+            Reserve decision object (SimpleNamespace) with fpart,ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,Rcost
+        """        
         ### 0. CRITERIO N-1 PARA RESERVA TOTAL 
         if customReserve is None:
             # Carga mas grande desconectable, asumiendo un % de peak demand
@@ -2906,11 +2923,48 @@ class ADMMexchange:
                 z_PC={}, z_PV={},   
                 lam_C={}, lam_V={}, 
                 state_init={},
+                x_0=0,z_0=0,lam_0=0,
                 logger_level=logging.CRITICAL):
+        """
+            :param MGs:
+              (list[MG]) list of MGs in the MMG. len=N
+            :param methods:
+              (list[str]): List 'd', 's', 'r', 'drw' to select methods used. Must be len N.
+            :param trainingsamplesets:
+              (list): List of TrainingSet Objects() for each MG. Must be len N.
+            :param ednrparams:
+              (list[dict]): List of dicts with init and solve params for each solver. Must be len N.
+            :param neighbors:
+              (dict[int,list[int]]): Adjacency Map of MMG, e.g. {1:[2,3],2:[4]}. Must be len N.
+            :param linecosts:
+              (float): Unit cost of transporting energy in $/kWh. Same for all lines.
+            :param lineCaps:
+              (dict[tuple[int,int],float | int]): Map of max P to transport in kW for each line. E.g. {(2,3):2000,(1,2):1000}
+            :param rho:
+              (float | int): ADMM parameter for convergence tuning.
+            :param max_iters:
+              (int, optional): Defaults to 1000.
+            :param error_threshold:
+              (float, optional): Defaults to 1E-6. Convergence threshold for the sum of N residuals.
+            :param P_C,P_V:
+              (dict, optional): Defaults to {}. Initial values for exchanges (x0).
+            :param z_PC,z_PV:
+              (dict, optional): Defaults to {}. Initial values for consensus variables (z0).
+            :param lam_C,lam_V:
+              (dict, optional): Defaults to {}. Initial values for dual variables (lambda0).
+            :param state_init:
+              (dict, optional): Defaults to {}. Initial state for warm start of MG solvers. Not implemented.
+            :param x_0,z_0,lam_0:
+              (int, optional): Defaults to 0. Initial values for (x0,z0,lambda0) to initialize uniformly.
+            :param logger_level:
+              (Literal, optional): Defaults to logging.CRITICAL.'
+
+
+        """      
 
         ## INIT LOGGER
         admmlogger=logging.getLogger(__name__)
-        logging.basicConfig(format="[%(lineno)2s - %(funcName)2s] %(message)s",stream=sys.stdout)
+        logging.basicConfig(format="[%(lineno)2s - ADMM] %(message)s",force=True,stream=sys.stdout)
         admmlogger.setLevel(logger_level)
         self.admmlogger=admmlogger
         T=24
@@ -2928,6 +2982,7 @@ class ADMMexchange:
         for i,mg in enumerate(MGs):
             x,j=detEDnR(mg,**ednrparams[i]).solve(**ednrparams[i])
             assert j!=-1, f"====TEST FAILED FOR MG{i}==="
+        logging.basicConfig(format="[%(lineno)2s - ADMM] %(message)s",force=True,stream=sys.stdout)
         admmlogger.warning("===Test successfull. Initializing MMG===")
 
 
@@ -2998,6 +3053,7 @@ class ADMMexchange:
         for i,mg in enumerate(MGs):
             agentidx=i+1
             admmlogger.info(f"Setting up solver for MG{agentidx}")
+            logging.basicConfig(format=f"[%(lineno)2s - MG{agentidx} - %(funcName)2s] %(message)s",force=True,stream=sys.stdout)
             solvers.append(xEDnR_callers[i](mg,**ednrparams[i]|ADMMsolverinit[agentidx],
                                             model_name=f"MG{agentidx}_{methods[i]}"))
             # Train_Sets.append(solvers[i].generateSampleSet(Nsamples))
@@ -3006,6 +3062,8 @@ class ADMMexchange:
 
             admmlogger.info(f"mg.neighbors= {solvers[i].neighbors}")
         self.solvers=solvers
+        logging.basicConfig(format="[%(lineno)2s - ADMM] %(message)s",force=True,stream=sys.stdout)
+
         # ====== INIT HISTORIAS ======
 
         # DICT OF LISTS, HARDER TO BUILD, EASIER TO PARSE
@@ -3015,6 +3073,8 @@ class ADMMexchange:
         dual_hist = {idx:{"linf":[], 'l2':[]} for idx in undirected_edges|{'sum'}}
         P_C_hist = {(i,j):[] for (i,j) in directed_edges}
         P_V_hist = {(i,j):[] for (i,j) in directed_edges}
+        lam_C_hist = {(i,j):[] for (i,j) in directed_edges}
+        lam_V_hist = {(i,j):[] for (i,j) in directed_edges}
         # IN THIS CASE LIST OF DICTS
         # statehist=[{i:{},j:{}} , {...}] guarda copia del state por agente per iter
         x_state_hist = [] 
@@ -3048,11 +3108,15 @@ class ADMMexchange:
                 solver.logger.debug(f"lam_C_i: {lam_C_i}")
                 solver.logger.debug(f"lam_V_i: {lam_V_i}")
 
+                logging.basicConfig(format=f"[%(lineno)2s - MG{i} - %(funcName)2s] %(message)s",force=True,stream=sys.stdout)
                 xdec,jis = solver.solveOrResolve(**params,z_PC=z_PC_i,z_PV=z_PV_i,lambdas_C=lam_C_i,lambdas_V=lam_V_i) 
                 res={"P_C":{(i,j): xdec.P_C[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
                     "P_V":{(i,j): xdec.P_V[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
-                    "state":{'xdec':{"Full EDnResult(...)"}}} # Que guardar para warm start
+                    "state":{'xdec':{"Full EDnResult(...)"},'jis':jis}} # Que guardar para warm start
+                # For history
+                logging.basicConfig(format="[%(lineno)2s - ADMM] %(message)s",force=True,stream=sys.stdout)
                 solver.logger.debug(f"res: {res}")
+                # Just for the final
                 res["state"]["xdec"]=xdec
                 # Actualiza P_C y P_V locales del agente i
                 for tup, val in res.get("P_C").items():
@@ -3072,7 +3136,7 @@ class ADMMexchange:
             admmlogger.debug(f"P_C: {P_C}")
             admmlogger.debug(f"P_V: {P_V}")
 
-            x_state_hist.append( {i:deepcopy(state[i]) for i in agents} )
+            x_state_hist.append( {i:deepcopy(state[i]["jis"]) for i in agents} )
 
             # ---------- (2) ACTUALIZACIÓN z^k+1: usa x^{k+1} y lam^k ----------
             # Guarda z^k para residuales de consenso por agente
@@ -3118,6 +3182,12 @@ class ADMMexchange:
                     lam_C[(i, j)] += rho * (P_C[(i, j)] - z_PC[(i, j)])
             admmlogger.debug(f"lam_C: {lam_C}")
             admmlogger.debug(f"lam_V: {lam_V}")
+            for tup, val in lam_C.items():
+                # Guardar hist
+                lam_C_hist[tup].append(val)
+            for tup, val in lam_V.items():
+                # Guardar hist
+                lam_V_hist[tup].append(val)
 
             # ---------- (4) RESIDUALES DE CONSENSO POR AGENTE y HISTORIA DE P ----------
             # Residuals primal y dual, de L2 y Linf de cada agente/line, y suma
@@ -3181,6 +3251,7 @@ class ADMMexchange:
             # Historias
             'primal_hist':primal_hist,'dual_hist':dual_hist,
             "P_C_hist": P_C_hist,"P_V_hist": P_V_hist,
+            "lam_C_hist":lam_C_hist,"lam_V_hist":lam_V_hist,
             "x_state_hist": x_state_hist,      # dict i -> lista de estados (warm-start friendly)
         }
     def get_result(self):
