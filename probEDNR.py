@@ -41,6 +41,15 @@ def vectoprint(arr,n=1,perc=False):
     s="%" if perc else "f"
     return [f"[{i}]{el:.{n}{s}}" for i,el in enumerate(arr)]    
 
+# Source - https://stackoverflow.com/a/59888924
+# Posted by Scott Gigante.
+# Retrieved 2026-02-10, License - CC BY-SA 4.0
+def RoundToSigDigits(x, digits):
+    x = np.asarray(x)
+    x_positive = np.where(np.isfinite(x) & (x != 0), np.abs(x), 10**(digits-1))
+    mags = 10 ** (digits - 1 - np.floor(np.log10(x_positive)))
+    return np.round(x * mags) / mags
+
 ## Generator Class
 @dataclass
 class Generator:
@@ -280,8 +289,6 @@ class genericStochasticProgram:
             self.logger.error(f"=== Experiment Set #{i} ===")
             yield self.simulate(dataset,testSampleSet,paramRange)
     ###################
-
-
     ###################
     ### INTERFACES FOR DOING
     # for p in params: for s in trainsets: solvetest(p,s)
@@ -410,7 +417,7 @@ class EDnR(genericStochasticProgram):
     """
     def __init__(self,MG:MG,subperiods:int=30,strictlycircularbess:bool=True,BESS_SOE_init=0.0,
                  plotcolors=None,seed=None,grb_verbose:bool=False,logger_scope:int=1,
-                 logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,needMPO:bool=False,**kwargs):
+                 logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,needMPO:bool=False,cost_units:str="COP",power_units="k",**kwargs):
         """
             :param MG:
                 (MG). Microgrid to use.
@@ -465,7 +472,17 @@ class EDnR(genericStochasticProgram):
         self.strictlycircularbess=strictlycircularbess
         assert BESS_SOE_init>=0 and BESS_SOE_init<=1, "BESS_SOE_init not in [0,1]"
         self.BESS_SOE_init=BESS_SOE_init
-        
+        # Manually switch off simultaneous charge-discharge Exception throw
+        # self.logger.critical(f"kwargs {kwargs}")
+        self.turnOffBatteryFeasException=kwargs.get("turnOffBatteryFeasException",False)
+        self.enforceBinaryBESS=kwargs.get("enforceBinaryBESS",False)
+        self.needMPO=needMPO
+        self.cost_units=cost_units
+        assert power_units in {"k","M"}, "Only k[W] or M[W] for now"
+        self.power_units=power_units
+        self.Pthresh=1e-2 if self.power_units=="k" else 1e-5
+
+
         # MG Nominal Demand
         self.peak_demand_kw=self.MG.peak_demand_kw #IT WILL BE STATIC
         self.demand_curve_pu=self.MG.demand_curve_pu
@@ -502,6 +519,8 @@ class EDnR(genericStochasticProgram):
                         self.idx_windMPPT=i 
                         self.windMPPTavailable=True
                         self.wind_gen_curve_kw_smpgen=deepcopy(np.array(g.gen_curve_pu)*g.power_kw)
+                        for u in g.power_perunit_kw:
+                            assert (self.power_units=="k" and u==100) or (self.power_units=="M" and u==0.1), "ONLY DEFINED FOR 100KW TURBINES"
                         self.N100kWT_smpgen=len(g.power_perunit_kw)
                     case _:
                         raise Exception("Undefined Type 2 Gen")
@@ -527,9 +546,7 @@ class EDnR(genericStochasticProgram):
                     break
             else: #for-break-else is pretty cool
                 raise Exception(f"Last Instance Not Found: {LastInstance}")
-
-        self.needMPO=needMPO
-
+        
         self.transactive=kwargs.get("transactive",False)
         # When inititating in TRANSACTIVE MODE
         # Instance must initiate with Neighbors, linecaps, linecosts, rho
@@ -542,11 +559,15 @@ class EDnR(genericStochasticProgram):
             self.lenneighbors=len(self.neighbors)
             if self.lenneighbors==0:
                 raise Exception("transactive EDnR requires neighbors list")
-            self.rho=kwargs.get("rho") # ADMM penalty param
+            self.rho_k=kwargs.get("rho") # ADMM penalty param
             self.lineCapacities=kwargs.get("lineCapacities") # Max line capacity with each neighbor (kW)
             self.lineCosts=kwargs.get("lineCosts") # Cost of energy transacted with neighbors ($/kWh)
             # Z AND LAMBDAS ARE SET ON SOLVE/RESOLVE
-            self.logger.warning(f"Instance set for transactive EDnR. neighbors: rho: {self.rho}, linecaps: {self.lineCapacities}, linecosts: {self.lineCosts}")
+            self.logger.warning(f"""Instance set for transactive EDnR.
+                                    neighbors: {self.neighbors},
+                                    rho: {self.rho_k},
+                                    linecaps: {self.lineCapacities},
+                                    linecosts: {self.lineCosts}""")
         else:
             self.logger.warning("Instance set for non-transactive EDnR")   
             
@@ -557,7 +578,7 @@ class EDnR(genericStochasticProgram):
             # self.createTrainSampleSetVar(kwargs.get("xi_hat"))
         
         # Create Gurobi Model
-        self.M=self.CreateModel(model_name,**kwargs)
+        self.CreateModel(model_name,**kwargs)
         self.sol_time=[]
         # PDF info are init attributes    
         with open('SolarPDF.yaml','r') as f:    
@@ -576,21 +597,103 @@ class EDnR(genericStochasticProgram):
         model_name=kwargs.get("model_name",datetime.strftime(datetime.today(),"%b%d_%H%M%S"))
         grb_licence_params=kwargs.get("grb_licence_params",None)
         env=gp.Env(params=grb_licence_params)
-        M=gp.Model(f"EDnR_{model_name}",env=env)
-        M.params.LogToConsole=self.grb_verbose
+        self.M=gp.Model(f"EDnR_{model_name}",env=env)
+        self.M.params.LogToConsole=self.grb_verbose
         self.logger.info(f"Model \"{model_name}\" created")
 
         ### MAIN VARIABLE
-        self.pG=M.addMVar(shape=(self.Ngen,self.T),name="pG",vtype=GRB.CONTINUOUS)
+        self.pG=self.M.addMVar(shape=(self.Ngen,self.T),name="pG",vtype=GRB.CONTINUOUS)
         
         ### BASE OBJECTIVE FUNCTION
         self.fobj=gp.LinExpr()
         for t in range(self.T):
             self.fobj+=self.c_gen_copkwh @ self.pG[:,t]
         # SET OBJECTIVE FUNCTION
-        M.setObjective(self.fobj,GRB.MINIMIZE)   
-        M.update()
-        return M
+        self.M.setObjective(self.fobj,GRB.MINIMIZE) # it gets changed anyway
+        self.M.update()
+
+    def setupTransactive(self,z_PC,z_PV,lambdas_C,lambdas_V,GenBal,rho):
+        # Z AND LAMBDAS MUST BE GIVEN 
+        assert z_PC is not None, f"z_PC is None"
+        assert z_PV is not None, f"z_PV is None"
+        assert lambdas_C is not None, f"lambdas_C is None"
+        assert lambdas_V is not None, f"lambdas_V is None"
+        assert rho is not None and rho>0, f"rho is None or >0"
+        self.z_PC_k=z_PC
+        self.z_PV_k=z_PV
+        self.lam_C_k=lambdas_C
+        self.lam_V_k=lambdas_V
+        self.rho_k=rho
+
+        # Add P compras and P ventas variables to model
+        P_C_var=self.M.addMVar(shape=((self.lenneighbors,self.T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(self.T)]).T,name="P_C") # P compras
+        P_V_var=self.M.addMVar(shape=((self.lenneighbors,self.T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(self.T)]).T,name="P_V") # P ventas
+        
+        # Add ADMM params as variables == constant RHS to update in resolve()
+        z_PC_var=self.M.addMVar(shape=((self.lenneighbors,self.T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
+        z_PV_var=self.M.addMVar(shape=((self.lenneighbors,self.T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
+        self.z_PC_ctrt=self.M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
+        self.z_PV_ctrt=self.M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
+        
+        lam_C_var=self.M.addMVar(shape=((self.lenneighbors,self.T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_C") # lambda compras
+        lam_V_var=self.M.addMVar(shape=((self.lenneighbors,self.T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_V") # lambda ventas   
+        self.lam_C_ctrt=self.M.addConstr(lam_C_var==self.lam_C_k,"lam_C_const")
+        self.lam_V_ctrt=self.M.addConstr(lam_V_var==self.lam_V_k,"lam_V_const")
+
+
+        # # Just an instance attribute, CONSTANT, CANT CHANGE IT
+        # for t in range(self.T):
+        #     for j in range(self.lenneighbors): #list of MG indices
+        #         ### METER INTERCAMBIOS EN FUNCION OBJETIVO
+        #         self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C_var[j,t]-lam_C_var[j,t]*P_V_var[j,t]
+        #         self.fobj+=(self.rho_k/2)*((P_C_var[j,t]-z_PC_var[j,t])*(P_C_var[j,t]-z_PC_var[j,t])+(P_V_var[j,t]-z_PV_var[j,t])*(P_V_var[j,t]-z_PV_var[j,t]))
+        
+        # # Flexible rho idea1
+        # rho_var=self.M.addVar(lb=-GRB.INFINITY,ub=GRB.INFINITY,name="rho")
+        # self.rho_ctrt=self.M.addConstr(rho_var==self.rho_k,"rho_const")
+        # admmPenaliz=self.M.addVar(lb=0,ub=GRB.INFINITY,name="admmPenaliz")
+        # temp=gp.QuadExpr()    
+        # for t in range(self.T):
+        #     for j in range(self.lenneighbors): #list of MG indices
+        #         ### METER INTERCAMBIOS EN FUNCION OBJETIVO
+        #         self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C_var[j,t]-lam_C_var[j,t]*P_V_var[j,t]
+        #         temp+=(P_C_var[j,t]-z_PC_var[j,t])*(P_C_var[j,t]-z_PC_var[j,t])+(P_V_var[j,t]-z_PV_var[j,t])*(P_V_var[j,t]-z_PV_var[j,t])
+        # self.logger.debug(f"temp: {temp}")
+        # self.M.addConstr(admmPenaliz==(rho_var/2)*sum(temp),"admmPenaliz_term_ctrt")
+        # self.logger.debug(f"admmPenaliz: {admmPenaliz}")
+        # self.fobj+=admmPenaliz
+
+        # # Flex rho idea2
+        # temp=gp.QuadExpr()    
+        # for t in range(self.T):
+        #     for j in range(self.lenneighbors): #list of MG indices
+        #         ### METER INTERCAMBIOS EN FUNCION OBJETIVO
+        #         self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C_var[j,t]-lam_C_var[j,t]*P_V_var[j,t]
+        #         ### CREAR PENALTY TERM
+        #         temp+=(P_C_var[j,t]-z_PC_var[j,t])*(P_C_var[j,t]-z_PC_var[j,t])+(P_V_var[j,t]-z_PV_var[j,t])*(P_V_var[j,t]-z_PV_var[j,t])
+        # # resolve() updates obj coefficient
+        # self.admmPenalty=self.M.addVar(lb=-GRB.INFINITY,ub=GRB.INFINITY,name="admmPenaliz",obj=self.rho_k/2)
+        # admmPenalty_ctrt=self.M.addConstr(self.admmPenalty==temp,"admmPenalty_ctrt")
+        # # admmPenalty_ctrt=self.M.addConstr(self.admmPenalty==sum(((P_C_var[j,t]-z_PC_var[j,t])*(P_C_var[j,t]-z_PC_var[j,t])+
+        # #                                                      (P_V_var[j,t]-z_PV_var[j,t])*(P_V_var[j,t]-z_PV_var[j,t]) 
+        # #                                                      for j in range(self.lenneighbors) for t in range(self.T))),"admmPenalty_ctrt")
+
+        # Flex rho idea3: update Obj function on resolve lmao
+        self.admmPenalty=gp.QuadExpr()    
+        for t in range(self.T):
+            for j in range(self.lenneighbors): #list of MG indices
+                ### METER INTERCAMBIOS EN FUNCION OBJETIVO
+                self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C_var[j,t]-lam_C_var[j,t]*P_V_var[j,t]#+1e-6*(P_C_var[j,t]+P_V_var[j,t])
+                ### CREAR PENALTY TERM
+                self.admmPenalty+=(P_C_var[j,t]-z_PC_var[j,t])*(P_C_var[j,t]-z_PC_var[j,t])+(P_V_var[j,t]-z_PV_var[j,t])*(P_V_var[j,t]-z_PV_var[j,t])
+        # NO, YOU DO IT ON SOLVE TO LEAVE FOBJ LIKE IT IS
+        # self.fobj+=(self.rho_k/2)*self.admmPenalty
+
+        self.P_C=P_C_var
+        self.P_V=P_V_var
+        ### METER INTERCAMBIOS EN BALANCE DE CARGA
+        GenBal+=P_C_var.sum(axis=0)-P_V_var.sum(axis=0)
+
 
     def createXiScenarioSetVar(self,XiScenarioSet):
         """
@@ -680,8 +783,8 @@ class EDnR(genericStochasticProgram):
                     # self.logger.critical(f"===== UNFEASIBLE =====\nCurrent kwargs: {kwargs}")
                     # return None,-1
                     
-                kwargs["customReserve"]={"up":np.round(cresrv["up"]*1.2,0),
-                                            "down":np.round(cresrv["down"]*1.2,0)}
+                kwargs["customReserve"]={"up":RoundToSigDigits(cresrv["up"]*1.2,4),
+                                            "down":RoundToSigDigits(cresrv["down"]*1.2,4)}
                 kwargs["fullretry"]=True
                 self.logger.critical(f"RETRYING WITH KWARGS: {kwargs}")
                 x_dec,Jis=self.solveOrResolve(trainSampleSet,**kwargs)
@@ -711,7 +814,7 @@ class EDnR(genericStochasticProgram):
             return None,-1,-1,0,1 # will never happen btw, solveOrResolve always retries or raises Exception
     
     def resolve(self,hassamplectrt:bool,trainSampleSet=None,Q=None,rwass=None,
-                       lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,dontupdateTrainSample=False,**kwargs):
+                            lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,rho=None,plot_ED=False,dontupdateTrainSample=False,**kwargs):
         """
         If given, actualiza trainsampleset (if samesize).
         If given, actualiza ADMM vars.
@@ -771,7 +874,6 @@ class EDnR(genericStochasticProgram):
             assert lambdas_C is not None and lambdas_V is not None and z_PC is not None and z_PV is not None, "All z and lambdas must be set on every resolve"
             assert not self.neighbors==[], "Instance has no neighbors, cannot pass ADMM parameters"
             assert self.lenneighbors==len(lambdas_C)==len(lambdas_V)==len(z_PC)==len(z_PV),"ADMM parameter lists must have same length as number of neighbors"
-            
             self.logger.info("updating z and lambda values (RHS) with ADMM parameters passed to resolve()")
             self.z_PC_k=z_PC
             self.z_PV_k=z_PV
@@ -782,9 +884,29 @@ class EDnR(genericStochasticProgram):
             self.z_PV_ctrt.RHS=self.z_PV_k
             self.lam_C_ctrt.RHS=self.lam_C_k
             self.lam_V_ctrt.RHS=self.lam_V_k
-    
+            
+            # for variable rho idea1
+            # assert rho is not None, "rho not re-set"
+            # self.rho_k = rho 
+            # self.rho_ctrt.RHS=self.rho_k
+
+            # # var rho idea2
+            # # RESOLVE UPDATES COEFFICIENT
+            # assert rho is not None, "rho not re-set, must always re-set"
+            # self.rho_k = rho 
+            # self.admmPenalty.obj=self.rho_k/2
+
+            # idea3
+            # # RESOLVE UPDATES FOBJ
+            assert rho is not None, "rho not re-set, must always re-set"
+            self.rho_k = rho 
+
         # Resolve Model
-        self.logger.info("solving...")
+        if self.transactive:
+            self.M.setObjective(self.fobj+(self.rho_k/2)*self.admmPenalty, GRB.MINIMIZE)
+        else:
+            self.M.setObjective(self.fobj, GRB.MINIMIZE)
+        self.logger.info("resolving...")
         try:
             self.M.optimize()
         except gp.GurobiError as e:
@@ -821,18 +943,10 @@ class EDnR(genericStochasticProgram):
                 result.kappa=self.kappa.X
         
         result.ObjVal=self.M.ObjVal
-        # GETTING THE DUALS MAY BE A BIT HARDER IN DROW
+        
+        # GETTING THE DUALS
         if self.needMPO:
-            try:
-                result.MPO=self.loadbalanceCtrt.Pi
-            except gp.GurobiError as e:
-                self.logger.warning(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
-                fixedmodel=self.M.fixed()
-                fixedmodel.optimize()
-                fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
-                result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
-                assert len(result.MPO)==self.T and (result.MPO>0).all(),f"Invalid LMP/MPOs: {result.MPO}"
-
+            result.MPO=self.getMPO()
         result.Pgen=self.pG.X
         # ADMM variables
         if self.transactive:
@@ -847,13 +961,22 @@ class EDnR(genericStochasticProgram):
             result.PBESS=pDC_res-pCH_res
             result.SOE=SOE_res
             for t in range(self.T):
-                if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-                    self.logger.critical(f"t={t}")
-                    self.logger.critical(f"pCH_res: {pCH_res[:t+1]}")
-                    self.logger.critical(f"pDC_res: {pDC_res[:t+1]}")
-                    self.logger.critical(f"SOE_res: {SOE_res[:t+1]}")
-                    raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
+                if(pCH_res[t]>self.Pthresh and pDC_res[t]>self.Pthresh) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
+                    self.logger.error(f"t={t}")
+                    self.logger.error(f"pCH_res: {pCH_res[:t+1]}")
+                    self.logger.error(f"pDC_res: {pDC_res[:t+1]}")
+                    self.logger.error(f"SOE_res: {SOE_res[:t+1]}")
+                    if not self.turnOffBatteryFeasException:
+                        raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
+        # # Calc ADMM penalty
+        # temp=0
+        # for j in self.len
+        # result.penalty=temp
         
+        # temp+=(self.rho_k/2)*(result.P_C[j,t]-z_PC_var[j,t])*(P_C_var[j,t]-z_PC_var[j,t])+(P_V_var[j,t]-z_PV_var[j,t])*(P_V_var[j,t]-z_PV_var[j,t])
+
+
+
         c_gen_copkwh_w_bess=self.c_gen_copkwh
         if self.HAS_BESS: c_gen_copkwh_w_bess=np.append(c_gen_copkwh_w_bess,self.c_chdc_copkwh)   
         
@@ -872,11 +995,11 @@ class EDnR(genericStochasticProgram):
             if self.transactive:
                 for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
-                    if result.P_C[j,t]>1e-2:
+                    if result.P_C[j,t]>self.Pthresh:
                         Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
                     # if actually selling, sub LAM * P_V
-                    if result.P_V[j,t]>1e-2:
-                        Cost_of_EDnR-=self.lam_V_k[j,t]*result.P_V[j,t]        
+                    if result.P_V[j,t]>self.Pthresh:
+                        Cost_of_EDnR+=self.lam_V_k[j,t]*result.P_V[j,t]        
         
         if hasattr(self,'ReserveResult'): #just for det
             result.EDcost=Cost_of_EDnR
@@ -891,6 +1014,37 @@ class EDnR(genericStochasticProgram):
         # return result,result.EDnRcost #x_dec,Jis
         return result,Jis
 
+        ## CAN BE HARD TO GET ON MILP
+    def getMPO(self):
+        try:
+            mpo=self.loadbalanceCtrt.Pi
+        except gp.GurobiError as e:
+            self.logger.warning(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
+            fixedmodel=self.M.fixed()
+            fixedmodel.optimize()
+            self.logger.info(f"Fixed Model has {fixedmodel.NumVars} Vars, {fixedmodel.NumNZs} Num NZs, {fixedmodel.NumConstrs} Constraints, {fixedmodel.NumQConstrs} QConstrts, {fixedmodel.NumGenConstrs} GenCtrts, {fixedmodel.NumBinVars} BinVars, {fixedmodel.NumSOS} SOSCtrts")
+            self.logger.info(f"Fixed Status: {fixedmodel.status} [2 is OPT]")
+            i,max_reiters=0,10
+            while fixedmodel.status==13 and i<max_reiters:
+                tol=fixedmodel.Params.BarQCPConvTol
+                newtol=tol*0.001
+                fixedmodel=self.M.fixed()
+                self.logger.critical(f"Fixed Model is Status: {fixedmodel.status}, decreasing BarQCPConvTol from {tol} to {newtol}")
+                fixedmodel.Params.BarQCPConvTol=newtol
+                fixedmodel.optimize()
+                i+=1
+            if fixedmodel.status==13: raise Exception("Lol still suboptimal")
+            fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
+            try:
+                mpo=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
+            except Exception as e:
+                self.logger.critical(f"Fixed Model Status: {fixedmodel.status}.")
+                raise Exception(f"Nope: {e}")
+            # assert len(mpo)==self.T and (mpo>0).all(),f"Invalid LMP/MPOs: {mpo}"
+            if (mpo<0).any(): self.logger.critical(f"Negative LMP/MPOs!: {RoundToSigDigits(mpo,4).astype(float)}")
+            assert len(mpo)==self.T,f"Invalid LMP/MPOs: {mpo}"
+        return mpo
+    
     # For plotting SOE logically
     def SOEvectoplot(self,vec):
         if self.strictlycircularbess:
@@ -923,7 +1077,7 @@ class EDnR(genericStochasticProgram):
         if hasattr(GTI_Wm2,"__len__"):
             return [self.SPVPower(gti,PnomAtSTC_kw) for gti in GTI_Wm2]
         else:
-            return GTI_Wm2*PnomAtSTC_kw/1000
+            return PnomAtSTC_kw*GTI_Wm2/1000 # SPV peak gen sets the scale
     def SolarRand(self,PnomAtSTC_kw,window=7,subsubperiods=2,roll_hours=0.2):
         """Pout y Delta Pout con respecto al promedio.
         Con base en Puerto Carreño (Solcast).
@@ -952,7 +1106,7 @@ class EDnR(genericStochasticProgram):
         fastGTICurve_LPF=np.convolve(fastGTICurve,LPFimpResp,mode='valid')
         fastGTICurve_LPF=np.roll(fastGTICurve_LPF,int(roll_hours*self.subperiods))
         fastPoutCurve_LPF=np.array(self.SPVPower(fastGTICurve_LPF,PnomAtSTC_kw))
-        return fastPoutCurve_LPF
+        return fastPoutCurve_LPF # in kW, if self power units is M then in MW
 
     def WTPower(self,vw_meas:'m/s',r:'m'=9,startVw:'m/s'=3,cutVw:'m/s'=25,pomax_unit:'kW'=100,H_meas:'m'=50,H_WT:'m'=50,airdensity:'kg/m3'=1.22)->'kW':
         """Usando Turbinas convencionales de eje horizontal de 100kW pico."""
@@ -969,10 +1123,15 @@ class EDnR(genericStochasticProgram):
                 decay=2 # smaller means max eff range is wider (~TSR-control is better)
                 vw_maxeff=8 # peak efficiency wind speed
                 nonideal_func=NonIdeal*2.7*(vw_meas/vw_maxeff)**decay*np.exp(-(vw_meas/vw_maxeff)**decay)+0.03*vw_meas # to move up the end tail a bit
-                po=nonideal_func*BetzCoeff*WindPower/1e3
+                po_w=nonideal_func*BetzCoeff*WindPower
                 ##### c_p static (perfect TSR-control)
                 # xx=NonIdeal*BetzCoeff*WindPower/1e3
-                return min(po,pomax_unit)
+                # SET THE SCALE
+                if self.power_units=="k":
+                    return min(po_w/1e3 , pomax_unit)
+                elif self.power_units=="M":
+                    return min(po_w/1e6 , pomax_unit/1e3)
+                else: raise Exception("???")
             else:
                 return 0
     def WindRand(self,N_100kw_units,window=9,subsubperiods=1):
@@ -1010,6 +1169,7 @@ class EDnR(genericStochasticProgram):
     def generateDaySample(self,**kwargs):
         """Generate one Sample containing random Demand and Random Type 2 (MPPT) Solar and Wind Generation, if available."""
         xi_i=SimpleNamespace()
+        # with timed(f"Generating sample for {self.gennames}",logger=self.logger):
         xi_i.subperiods=self.subperiods
         xi_i.fastDemandCurve,xi_i.dayDev=self.randomizeDemand(**kwargs)
         if self.solarMPPTavailable:
@@ -1022,7 +1182,8 @@ class EDnR(genericStochasticProgram):
     
     def generateSampleSet(self,Nsamples,**kwargs):
         """Generate set of (day) Samples, either for training or testing."""
-        return [self.generateDaySample(**kwargs) for _ in range(Nsamples)]
+        with timed(f"Generating sample of {Nsamples} scenarios",self.logger):
+            return [self.generateDaySample(**kwargs) for _ in range(Nsamples)]
             
     ## RECOURSE ACTION
     # Microgrid Operation - Reserve Execution 
@@ -1044,22 +1205,28 @@ class EDnR(genericStochasticProgram):
 
         # Get Randomized Demand from sample
         fastDemCurve=day_sample.fastDemandCurve
-        if self.transactive:
-            Pbought=EDnRres.P_C
-            Psold=EDnRres.P_V
-            P_incoming=np.zeros(self.T)
-            for j in range(self.lenneighbors):
-                P_incoming+=Pbought[j]-Psold[j]
+        # ON OPERATION, LOCAL TOTAL DEMAND IS WHAT MATTERS
+        # OOOOOOR YOU COULD MOVE THE SUBTRACTION OF PINCOMING
+        # if self.transactive:
+        #     Pbought=EDnRres.P_C
+        #     Psold=EDnRres.P_V
+        #     P_incoming=np.zeros(self.T)
+        #     for j in range(self.lenneighbors):
+        #         P_incoming+=Pbought[j]-Psold[j]
 
-            for t in range(self.subperiods):
-                fastDemCurve[t] -= P_incoming[t//self.T]
+        #     for t in range(self.subperiods):
+        #         fastDemCurve[t] -= P_incoming[t//self.T]
 
-            demandcurvekw=self.demand_curve_kw-P_incoming
-            self.logger.debug(f"Pbought:{Pbought.astype(int)}")
-            self.logger.debug(f"Psold:{Psold.astype(int)}")
-            self.logger.debug(f"P_incoming:{P_incoming.astype(int)}")
-        else:
-            demandcurvekw=self.demand_curve_kw
+        #     demandcurvekw=self.demand_curve_kw-P_incoming
+        #     self.logger.debug(f"Pbought:{Pbought.astype(int)}")
+        #     self.logger.debug(f"Psold:{Psold.astype(int)}")
+        #     self.logger.debug(f"P_incoming:{P_incoming.astype(int)}")
+        # else:
+        #     demandcurvekw=self.demand_curve_kw
+        
+        # TRANSACTIONS ARE ALREADY TAKEN CARE OF, THEY ARE FIXED
+        # MGOPERATION ONLY CARES ABOUT DELTA PLOAD
+        demandcurvekw=self.demand_curve_kw
 
         self.logger.debug(f"fastDemcurve:{fastDemCurve.astype(int)}")
         # Get Randomized (Max) Generation (for Intermittents T2) from sample
@@ -1275,35 +1442,37 @@ class EDnR(genericStochasticProgram):
 
         # Plot
         if plot_op:
+            ## ALWAYS PLOTTING IN KW
+            scaling=1e3 if self.power_units=="M" else 1
             periods=np.arange(0,24+1/self.T,24/self.T)
-            fig,ax0=plt.subplots(figsize=(14,8))
+            fig,ax0=plt.subplots(figsize=(11,6))
             # Expected Demand (hourly)
-            ax0.step(periods,np.append(demandcurvekw,demandcurvekw[-1]),where='post',lw=2,label='Dem. esperada [D-1]')
+            ax0.step(periods,scaling*np.append(demandcurvekw,demandcurvekw[-1]),where='post',lw=2,label='Dem. esperada [D-1]')
             # Effective Demand served with ED+R (hourly)
-            ax0.step(periods,np.append(realEffDemand,realEffDemand[-1]),where='post',lw=2,label='Dem. atendida (ED+R) [D]')
+            ax0.step(periods,scaling*np.append(realEffDemand,realEffDemand[-1]),where='post',lw=2,label='Dem. atendida (ED+R) [D]')
             # Real Demand (fast)
             subpidx=np.arange(0,24*self.subperiods,24/self.T)/self.subperiods
-            ax0.plot(subpidx,fastDemCurve,label="Dem. real (D)",alpha=0.4)
+            ax0.plot(subpidx,scaling*fastDemCurve,label="Dem. real (D)",alpha=0.4)
             # Real Effective Demand (fast)
             if plotFastEffDemand:
-                ax0.plot(subpidx,fastEffDem,label=r"Dem. efectiva (D)",alpha=0.4)
+                ax0.plot(subpidx,scaling*fastEffDem,label=r"Dem. efectiva (D)",alpha=0.4)
             # Type 2 Gen
             if self.solarMPPTavailable:
-                ax0.plot(subpidx,fastPSolar,label=r"$P_{spv}$",alpha=0.4)
+                ax0.plot(subpidx,scaling*fastPSolar,label=r"$P_{spv}$",alpha=0.4)
             if self.windMPPTavailable:
-                ax0.plot(subpidx,fastPWind,label=r"$P_{wp}$",alpha=0.4)
+                ax0.plot(subpidx,scaling*fastPWind,label=r"$P_{wp}$",alpha=0.4)
             ax0.grid(True, linestyle='--', alpha=0.3)
             ax0.set_xticks(periods)
             ax0.set_xlim([0,24])
-            ax0.set_ylabel('Potencia (kW)')
+            ax0.set_ylabel("Potencia (kW)")
             ax0.set_xlabel('Tiempo (h)')
             ylim=ax0.get_ylim()
             ax0.set_ylim((ylim[0]*0.4,ylim[1]*1))
             # AGC Cost
             ax1=ax0.twinx()
             ax1.stackplot(periods,np.concatenate((op_cost,np.array([op_cost[:,-1]]).T),axis=1),labels=disp_gennames,step='post',alpha=0.8,colors=self.plotcolors)
-            ax1.set_ylabel('Costo por Desviaciones (COP)')
-            ax1.yaxis.set_major_formatter('${x:,.0f}')
+            ax1.set_ylabel(f"Costo por Desviaciones (${self.cost_units})")
+            ax1.yaxis.set_major_formatter('{x:,.0f}')
             # ylim=EDnRres.EDnRcost/self.T
             # ylim_vis=2.5
             # pos=0.2
@@ -1319,26 +1488,27 @@ class EDnR(genericStochasticProgram):
                 ax2.spines['left'].set_position(('axes',-0.1))
                 ax2.yaxis.set_label_position('left')
                 ax2.yaxis.set_ticks_position('left')
-                ax2.plot(periods,self.SOEvectoplot(EDnRres.SOE),lw=1,label='SOE esperado [D-1]',alpha=0.8)
-                ax2.plot(periods,np.append(EDnRres.SOE[0],SOE_real),lw=1,label='SOE real [D]',alpha=0.8)
-                ax1.text(0.81,0.1,f"RestricSOE={Noverdischarge+Novercharge}/24",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
+                ax2.plot(periods,scaling*self.SOEvectoplot(EDnRres.SOE),lw=1,label='SOE esperado [D-1]',alpha=0.8)
+                soe_real_plot=np.append(EDnRres.SOE[-1] if self.strictlycircularbess else self.BESS_SOE_init*self.CE_bess_kwh,SOE_real)
+                ax2.plot(periods,scaling*soe_real_plot,lw=1,label='SOE real [D]',alpha=0.8)
+                ax1.text(0.81,0.1,f"RestricSOE={Noverdischarge+Novercharge}/24",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.9, edgecolor='none'))
                 ax2.set_ylabel("SOE (kWh)")
                 # ylim=ax2.get_ylim()
                 # ax2.set_ylim((ylim[0]-(ylim[1]-ylim[0])*0.1,(ylim[1]-ylim[0])*1.6))
-                ax2.set_ylim((0,self.CE_bess_kwh*1.5))
+                ax2.set_ylim((0,scaling*self.CE_bess_kwh*1.5))
                 SOE_tick_labels=ax2.get_yticklabels()
-                SOE_tick_labels = [f"{lab.get_text()} - {float(lab.get_text().replace('−','-'))/self.CE_bess_kwh:.0%}" for lab in SOE_tick_labels]
+                SOE_tick_labels = [f"{lab.get_text()}\n{float(lab.get_text().replace('−','-'))/(self.CE_bess_kwh*scaling):.0%}" for lab in SOE_tick_labels]
                 ax2.set_yticklabels(SOE_tick_labels)
                 h_,l_=ax2.get_legend_handles_labels()
                 h0,l0=h_+h0,l_+l0
-                leg0=(0.18,0.97)
+                leg0=(0.16,0.97)
             fig.legend(h0,l0,loc='upper left', bbox_to_anchor=leg0, frameon=True)
             fig.legend(h1,l1,loc='upper right', bbox_to_anchor=leg1, frameon=True)
             # ax1.text(0.01,0.02,f"Desv. del pico diario={dayDev-1:.2%}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
-            ax1.text(0.01,0.06,f"Rec. RSF=${total_op_cost:,.0f} COP",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
-            ax1.text(0.81,0.06,f"Fuera de margen={Nundermargin+Novermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
+            ax1.text(0.01,0.06,f"Rec. RSF=${total_op_cost:,.0f} {self.cost_units}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.9, edgecolor='none'))
+            ax1.text(0.78,0.06,f"Fuera de margen={Nundermargin+Novermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.9, edgecolor='none'))
             if self.transactive:
-                ax1.text(0.01,0.02,"[\"Dem\"=Dem+PVen-PCompr]",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))     
+                ax1.text(0.01,0.02,"[\"Dem\"=Dem+PV-PC]",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.9, edgecolor='none'))     
             # ax1.text(0.81,0.02,f"Sobremarg={Novermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
             # ax1.text(0.81,0.06,f"Submarg={Nundermargin}/{self.subperiods*24}",transform=ax0.transAxes,fontsize=10,bbox=dict(facecolor='lightgray', alpha=0.7, edgecolor='none'))
             fig.set_dpi(500)
@@ -1378,6 +1548,7 @@ class EDnR(genericStochasticProgram):
     def GetExpectedFromSampleSet(self,DaySamplesSet):
         """Returns expected Demand and Type 2 (MPPT) generation (if available) from Sample.
         For use in ED (24 periods)."""
+        scaling=(1e3 if self.power_units=="M" else 1)
         Nsamples=len(DaySamplesSet)
         avgDaySample={}
         # Demand
@@ -1385,7 +1556,7 @@ class EDnR(genericStochasticProgram):
         for samp in DaySamplesSet:
             avgDemCurve+=[sum(samp.fastDemandCurve[i*self.subperiods:(i+1)*self.subperiods])/self.subperiods for i in range(self.T)]
         avgDemCurve/=Nsamples
-        avgDaySample['demand_curve_kw']=np.round(avgDemCurve,0)
+        avgDaySample['demand_curve_kw']=RoundToSigDigits(avgDemCurve,4)
         avgDaySample['demand_curve_pu']=avgDaySample['demand_curve_kw']/self.peak_demand_kw
 
         # Solar Type2
@@ -1394,14 +1565,15 @@ class EDnR(genericStochasticProgram):
             for samp in DaySamplesSet:
                 avgPsolarCurve+=[sum(samp.fastPSolar[i*self.subperiods:(i+1)*self.subperiods])/self.subperiods for i in range(self.T)]
             avgPsolarCurve/=Nsamples
-            avgDaySample['Psolar_kw']=np.round(avgPsolarCurve,0)
+            # avgDaySample['Psolar_kw']=RoundToSigDigits(avgPsolarCurve,4)
+            avgDaySample['Psolar_kw']=np.round(avgPsolarCurve*scaling,3)/scaling
         # Wind Type2
         if self.windMPPTavailable:
             avgPwCurve=np.zeros(self.T)
             for samp in DaySamplesSet:
                 avgPwCurve+=[sum(samp.fastPWind[i*self.subperiods:(i+1)*self.subperiods])/self.subperiods for i in range(self.T)]
             avgPwCurve/=Nsamples
-            avgDaySample['Pwind_kw']=np.round(avgPwCurve,0)
+            avgDaySample['Pwind_kw']=np.round(avgPwCurve*scaling,3)/scaling
         return avgDaySample # E[xi]
     
     def updateNominaltoSampleSetMean(self,DaySamplesSet):
@@ -1425,7 +1597,6 @@ class EDnR(genericStochasticProgram):
         # need the deepcopy, to ensure deletion of meanScenario (i think)
         self.demand_curve_kw=deepcopy(meanScenario['demand_curve_kw']) 
         self.demand_curve_pu=self.demand_curve_kw/self.peak_demand_kw
-
         self.logger.debug(f"expected, new nominal Day: {meanScenario}")
 
         ## update solar nominal gen curve
@@ -1506,6 +1677,7 @@ class EDnR(genericStochasticProgram):
         Returns    
             Reserve decision object (SimpleNamespace) with fpart,ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,Rcost
         """        
+        scaling=1e3 if self.power_units=="M" else 1
         ### 0. CRITERIO N-1 PARA RESERVA TOTAL 
         if customReserve is None:
             # Carga mas grande desconectable, asumiendo un % de peak demand
@@ -1526,12 +1698,12 @@ class EDnR(genericStochasticProgram):
         if Res_verbose:
             if (self.logger.level>logging.WARNING):
                 self.logger.critical("logging level too high, Reserve info not shown")
-            self.logger.warning(f"Total Rsrv: +{ResupTotal/1000:.2f}MW, -{ResdownTotal/1000:.2f}MW")
+            self.logger.warning(f"Total Rsrv: +{ResupTotal*scaling:.2f}kW, - {ResdownTotal*scaling:.2f}kW")
             self.logger.warning(f"Freq Limits: {f_low-60}Hz, {f_hi-60}Hz, ")
-            self.logger.warning(f"R_MG: {R_MG_max*1000:.2f}Hz/MW, {R_MG_max*self.peak_demand_kw/60:.3%} puHz/puMW")
+            self.logger.warning(f"R_MG: {R_MG_max*1000/scaling:.2f}Hz/MW, {R_MG_max*self.peak_demand_kw/60:.3%} puHz/puMW")
         # 3. Definir factores de participacion, constantes de regulacion y holguras
         fpart=[0]*(self.Ngen+self.HAS_BESS) # % 
-        R=[0]*(self.Ngen+self.HAS_BESS) # Hz/kW
+        RegCnsts=[0]*(self.Ngen+self.HAS_BESS) # Hz/kW
 
         if self.HAS_BESS and fpart_bess is None:
             # idk a very ad hoc rule of thumb
@@ -1545,17 +1717,17 @@ class EDnR(genericStochasticProgram):
                 if not len(customReg)==self.Ngen+self.HAS_BESS:
                     raise Exception("wrong length for customReg")
                 else:
-                    R=customReg
-                    if min(R[np.nonzero(R)])<=R_MG_max:
+                    RegCnsts=customReg
+                    if min(RegCnsts[np.nonzero(RegCnsts)])<=R_MG_max:
                         raise Exception("R_MG larger than customReg elements! Change MG reserve margins")
-                    fpart=[R_MG_max/Ri for Ri in R]
+                    fpart=[R_MG_max/Ri for Ri in RegCnsts]
                     # Funcionalidad futura: Permitir algunos Ri custom y setear demas en consecuencia.
                     # Por ahora, relying on proper Rcustom definition
             else:
                 # 3.1.b.0. BESS (si hay) contribuye (f_part_bess)% del trabajo
                 if self.HAS_BESS:
                     fpart[-1]=fpart_bess #%
-                    R[-1]=R_MG_max/fpart_bess #Hz/kW
+                    RegCnsts[-1]=R_MG_max/fpart_bess #Hz/kW
                     R_MG_remaining=R_MG_max/(1-fpart_bess) #Hz/kW
                 else:
                     R_MG_remaining=R_MG_max #Hz/kW
@@ -1566,10 +1738,10 @@ class EDnR(genericStochasticProgram):
                 if Res_verbose:
                     self.logger.warning(f"Equal droops r: {r:.2%} puHz/puMW")
                 # 3.1.b.2. Si hay intermitentes no despachables (Tipo 2 o MPPT) asignarles r->+inf puHz/pukW
-                rTipo3=1000 # aka no participan en regulacion
-                R[:self.Ngen]=[r*60/g.power_kw if g.dispatchable else rTipo3*60/g.power_kw for g in self.MG.Gens] # Hz/kW
+                rTipo3=10000000 # aka no participan en regulacion
+                RegCnsts[:self.Ngen]=[r*60/g.power_kw if g.dispatchable else rTipo3*60/g.power_kw for g in self.MG.Gens] # Hz/kW
                 # 3.1.b.3. Calcular factores de participacion (%) en RSF
-                fpart[:self.Ngen]=[R_MG_max/Ri for Ri in R[:self.Ngen]] # %
+                fpart[:self.Ngen]=[R_MG_max/Ri for Ri in RegCnsts[:self.Ngen]] # %
                 if sum(g.intermittent and g.dispatchable for g in self.MG.Gens)>0:
                 # 3.1.b.4. Si hay despachables intermitentes (Tipo 3) ...
                     if Res_verbose:
@@ -1579,24 +1751,28 @@ class EDnR(genericStochasticProgram):
                     s=sum(f for f in fpart[:self.Ngen])# suma (de los non-bess)
                     # ... y se renormaliza para que los fpart sumen 1
                     fpart[:self.Ngen]=[f*(1-fpart_bess*self.HAS_BESS)/s for f in fpart[:self.Ngen]]
-                    R[:self.Ngen]=[R_MG_max/f for f in fpart[:self.Ngen]]
+                    RegCnsts[:self.Ngen]=[R_MG_max/f for f in fpart[:self.Ngen]]
 
             # 3.2. Definir Holguras/Margenes de Reserva rounded a 1kW (para eliminar Holgura Tipo 2)
-            H_n=np.round([ResdownTotal*f for f in fpart],0)
-            H_p=np.round([ResupTotal*f for f in fpart],0)
+            H_n=np.round([ResdownTotal*f*scaling for f in fpart],0)/scaling
+            H_p=np.round([ResupTotal*f*scaling for f in fpart],0)/scaling
+            # H_n=RoundToSigDigits([ResdownTotal*f for f in fpart],4)
+            # H_p=RoundToSigDigits([ResupTotal*f for f in fpart],4)
             for i,g in enumerate(self.MG.Gens):
                 Gcap = sum(g.power_perunit_kw)
-                assert Gcap > H_p[i], f"Unfeasible R+: {H_p[i]} for {g.type}, Pmax: {Gcap}"
-                assert Gcap > H_n[i], f"Unfeasible R-: {H_n[i]} for {g.type}, Pmax: {Gcap}"
+                assert Gcap > H_p[i], f"Unfeasible R+: {H_p[i]*scaling:.3f}kW for {g.type}, Pmax: {Gcap*scaling:.3f}kW"
+                assert Gcap > H_n[i], f"Unfeasible R-: {H_n[i]*scaling:.3f}kW for {g.type}, Pmax: {Gcap*scaling:.3f}kW"
             # Y recalcular ResupTotal y ResdownTotal en consecuencia
             ResupTotal=np.sum(H_p)
             ResdownTotal=np.sum(H_n)
             if self.HAS_BESS:
                 # 3.3. Se calculan las cotas de carga y descarga de BESS
+                # p_dc_max_bess_kw=RoundToSigDigits(max(self.p_dc_max_bess_kw-H_p[-1],0),4)
+                # p_ch_max_bess_kw=RoundToSigDigits(max(self.p_ch_max_bess_kw-H_n[-1],0),4)
                 p_dc_max_bess_kw=max(self.p_dc_max_bess_kw-H_p[-1],0)
                 p_ch_max_bess_kw=max(self.p_ch_max_bess_kw-H_n[-1],0)
                 if (0 in {p_dc_max_bess_kw , p_ch_max_bess_kw}):
-                    self.logger.critical(f"Batt cannot charge and/or discharge!: Pdc <= {p_dc_max_bess_kw:.0f}kW, Pch <= {p_ch_max_bess_kw:.0f}kW.")
+                    self.logger.critical(f"Batt cannot charge and/or discharge!: Pdc <= {p_dc_max_bess_kw*scaling:.0f}kW, Pch <= {p_ch_max_bess_kw*scaling:.0f}kW.")
                     retry=True
 
                 # 3.4. Se calculan Cotas de SOE
@@ -1628,10 +1804,10 @@ class EDnR(genericStochasticProgram):
                 break
 
         # 4. Se recalculan las constantes de regulacion finales
-        R_pu=[Ri*self.MG.Gens[i].power_kw/60 for i,Ri in enumerate(R[:self.Ngen])]
+        R_pu=[Ri*self.MG.Gens[i].power_kw/60 for i,Ri in enumerate(RegCnsts[:self.Ngen])]
         if self.HAS_BESS:
-            R_pu += [R[-1]*self.MG.BESS.power_kw/60]
-        R_HzMw=[Ri*1000 for Ri in R]      
+            R_pu += [RegCnsts[-1]*self.MG.BESS.power_kw/60]
+        R_HzMw=[Ri*1000 for Ri in RegCnsts]      
         
         # 5. Usar holguras para definir cotas de generacion para ED
         p_gmax_kw_mtx=np.vstack([np.array(g.gen_curve_pu)*g.power_kw-H_p[i] for i,g in enumerate(self.MG.Gens)])
@@ -1649,10 +1825,10 @@ class EDnR(genericStochasticProgram):
             self.logger.warning(f"For {[g.type for g in self.MG.Gens]+self.HAS_BESS*["BESS"]}")
             self.logger.warning(f"fpart: [{", ".join([f"{f:.1%}" for f in fpart])}]")
             self.logger.warning(f"R: [{", ".join(f"{r:.1%}" for r in R_pu)}]% puHz/puMW")
-            self.logger.warning(f"R: [{", ".join(f"{r:.1f}" for r in R_HzMw)}] Hz/MW")
-            self.logger.warning(f"H+: {H_p}kW")
-            self.logger.warning(f"H-: {H_n}kW")
-            self.logger.warning(f"ResTotal: +{ResupTotal}kW,-{ResdownTotal}kW")
+            self.logger.warning(f"R: [{", ".join(f"{r/scaling:.1f}" for r in R_HzMw)}] Hz/MW")
+            self.logger.warning(f"H+: {[f"{hp:.2f}" for hp in H_p*scaling]}kW")
+            self.logger.warning(f"H-: {[f"{hn:.2f}" for hn in H_n*scaling]}kW")
+            self.logger.warning(f"ResTotal: +{ResupTotal*scaling:.2f}kW,-{ResdownTotal*scaling:.2f}kW")
             if Res_verbose>1:
                 self.logger.warning(f"params passed to BaseED: {paramsForED}")
             
@@ -1669,6 +1845,7 @@ class EDnR(genericStochasticProgram):
         return paramsForED,ReserveResult
  
     def plotED(self,EDResult,plot_R=False,plotcolors=None,EDplotstyle='stack',stackalpha=0.7,**kwargs):
+        scaling=1e3 if self.power_units=="M" else 1
         # self.logger.debug(f"Result passed:{EDResult}")
         # Graficar demanda y generacion
         if plotcolors is not None:
@@ -1695,19 +1872,19 @@ class EDnR(genericStochasticProgram):
         
 
         periods = np.arange(0, 24+1/T, 24/T)
-        fig, ax0 = plt.subplots(figsize=(14,8))
-        ax0.step(periods,np.append(self.demand_curve_kw,self.demand_curve_kw[-1]),color="teal",linestyle='--',label='Demanda',where='post')
+        fig, ax0 = plt.subplots(figsize=(11,6))
+        ax0.step(periods,scaling*np.append(self.demand_curve_kw,self.demand_curve_kw[-1]),color="teal",linestyle='--',label='Demanda',where='post')
         ax0.set_xticks(periods)
         ax0.set_xlim((0,24))
         match EDplotstyle:
             case 'line'|'step'|'plot':
                 for i,p in enumerate(P_sys):
-                    ax0.step(periods, np.append(p,p[0]), where='post', label=genlabels[i], alpha=0.8,color=self.plotcolors[i]) #Clearer
+                    ax0.step(periods, scaling*np.append(p,p[0]), where='post', label=genlabels[i], alpha=0.8,color=self.plotcolors[i]) #Clearer
             case 'bars'|'bar'|'barplot':
                 n_sources = self.Ngen+self.HAS_BESS
                 width=0.8/n_sources
                 for i in range(n_sources):
-                    ax0.bar(periods[:-1] + (i+1)/(n_sources+1), P_sys[i], width, label=genlabels[i], color=self.plotcolors[i % len(self.plotcolors)])
+                    ax0.bar(periods[:-1] + (i+1)/(n_sources+1), scaling*P_sys[i], width, label=genlabels[i], color=self.plotcolors[i % len(self.plotcolors)])
                 ax0.tick_params(axis='x',bottom=True,top=False,labelbottom=True,labeltop=False,direction='out')        
                 axx=ax0.twiny()
                 axx.spines['bottom'].set_position('zero')
@@ -1716,7 +1893,7 @@ class EDnR(genericStochasticProgram):
                 axx.tick_params(axis='x',bottom=True,top=False,labelbottom=False,labeltop=False,direction='out')
             case 'stack'|'stackplot'|'stacked':
                 #Prettier
-                ax0.stackplot(periods, np.concatenate((P_sys,np.array([P_sys[:,-1]]).T),axis=1), labels=genlabels, alpha=stackalpha,step='post',colors=self.plotcolors)
+                ax0.stackplot(periods, scaling*np.concatenate((P_sys,np.array([P_sys[:,-1]]).T),axis=1), labels=genlabels, alpha=stackalpha,step='post',colors=self.plotcolors)
             case _:
                 raise Exception("Undefined ED plot style")
         ax0.set_xlabel('Tiempo (h)')
@@ -1726,38 +1903,39 @@ class EDnR(genericStochasticProgram):
         if self.HAS_BESS:
             # Segundo eje izquierda para el SOE
             ax1 = ax0.twinx()
-            ax1.spines['left'].set_position(('axes', -0.12))  # Mover a la izquierda de ax0
+            ax1.spines['left'].set_position(('axes', -0.11))  # Mover a la izquierda de ax0
             ax1.yaxis.set_label_position('left')
             ax1.yaxis.set_ticks_position('left')
             # SOE[2] es SOE(t=2:59), al final del periodo
             # se hace roll para mostrar el SOE acorde a la hora del punto
-            ax1.plot(periods, self.SOEvectoplot(EDResult.SOE), color='gold', linestyle='solid', label='SOE [t:00]')
+            ax1.plot(periods, scaling*self.SOEvectoplot(EDResult.SOE), color='gold', linestyle='solid', label='SOE [t:00]')
             ax1.set_ylabel('SOE (kWh)', color='black')
             ax1.tick_params(axis='y', labelcolor='black')
             ax1.locator_params(nbins=12,axis='y')
-            ax1.set_ylim((0,self.CE_bess_kwh*1.5))
+            ax1.set_ylim((0,scaling*self.CE_bess_kwh*1.5))
             SOE_tick_labels=ax1.get_yticklabels()
-            SOE_tick_labels = [f"{l.get_text()} - {float(l.get_text().replace('−','-'))/self.CE_bess_kwh:.0%}" for l in SOE_tick_labels]
+            SOE_tick_labels = [f"{l.get_text()}\n{float(l.get_text().replace('−','-'))/(scaling*self.CE_bess_kwh):.0%}" for l in SOE_tick_labels]
             ax1.set_yticklabels(SOE_tick_labels)
             h2, l2 = ax1.get_legend_handles_labels()
             h+=h2
             l+=l2
-            bbox1=(0.19,0.96)
+            bbox1=(0.17,0.96)
         fig.legend(h, l, loc='upper left',bbox_to_anchor=bbox1, frameon=True)
 
         # Primer eje derecho (COP/kWh)
         ax2 = ax0.twinx()
+        # THIS ONE IS UN-RESCALED
         ax2.step(periods, np.append(cop_kwh,cop_kwh[-1]), where='post', color='black', linestyle='--', label='Costo unitario')
-        ax2.set_ylabel('Costo unitario ($COP/kWh)')
-        ax2.set_ylim((0,np.round(max(cop_kwh)*1.5/200,0)*200))
+        ax2.set_ylabel(f'Costo unitario (${self.cost_units}/{self.power_units}Wh)')
+        ax2.set_ylim((0,np.round(max(cop_kwh)*1.5,0)))
         ax2.tick_params(axis='y', labelcolor='black')
 
         # Segundo eje derecho (COP totales)
         ax3 = ax0.twinx()
         ax3.spines['right'].set_position(('axes', 1.1))  # Mueve el eje un poco mas a la derecha
         ax3.step(periods, np.append(cop_hr,cop_hr[-1]), where='post', color='red', linestyle=':', label='Costo horario')
-        ax3.set_ylabel('Costo horario ($COP/h)')
-        ax3.set_ylim((0,np.round(max(cop_hr)*1.5/2.5e5,0)*2.5e5))
+        ax3.set_ylabel(f'Costo horario (${self.cost_units}/h)')
+        # ax3.set_ylim((0,np.round(max(cop_hr)*1.5/2.5e5,2)*2.5e5))
         ax3.tick_params(axis='y', labelcolor='black')
         ax3.yaxis.set_major_formatter('${x:,.0f}')
 
@@ -1767,10 +1945,10 @@ class EDnR(genericStochasticProgram):
                 bbox_to_anchor=(0.83, 0.96),  # coordenadas dentro del grafico
                 frameon=True)
 
-        ax0.text(0.02, 0.08,f"Promedio: ${cop_kwh_avg:,.0f} COP/kWh",transform=ax0.transAxes,fontsize=10,color='black',bbox=dict(facecolor='lightgray', alpha=0.8, edgecolor='none'))
+        ax0.text(0.02, 0.08,f"Promedio: ${cop_kwh_avg:,.0f} {self.cost_units}/{self.power_units}Wh",transform=ax0.transAxes,fontsize=10,color='black',bbox=dict(facecolor='lightgray', alpha=0.9, edgecolor='none'),zorder=100)
         just_ED_no_R = not hasattr(EDResult,'fpart')
         cost_of_ed=EDResult.EDcost if just_ED_no_R else EDResult.EDnRcost
-        ax0.text(0.02, 0.04,f"Costo Diario [ED{"" if just_ED_no_R else "+R"}]: ${cost_of_ed:,.0f} COP",transform=ax0.transAxes,fontsize=10,color='black',bbox=dict(facecolor='lightgray', alpha=0.8, edgecolor='none'))
+        ax0.text(0.02, 0.04,f"Costo Diario [ED{"" if just_ED_no_R else "+R"}]: ${cost_of_ed:,.0f} {self.cost_units}",transform=ax0.transAxes,fontsize=10,color='black',bbox=dict(facecolor='lightgray', alpha=0.9, edgecolor='none'),zorder=100)
         
         # plt.title("Despacho acumulado con costo/demanda")
         fig.set_dpi(500)
@@ -1781,7 +1959,7 @@ class EDnR(genericStochasticProgram):
             self.plotR(EDResult,stackalpha=stackalpha)
 
     def plotR(self,EDresult,stackalpha):
-
+        scaling=1e3 if self.power_units=="M" else 1
         genlabels=self.gennames 
         T=self.T
         if self.HAS_BESS:
@@ -1799,19 +1977,19 @@ class EDnR(genericStochasticProgram):
             RTn=np.tile(RTn,T)
 
         periods = np.arange(0, 24+1/T, 24/T)
-        fig, ax = plt.subplots(figsize=(14,8))
-        ax.stackplot(periods,np.concatenate((Hp,np.array([Hp[:,-1]]).T),axis=1),labels=genlabels, alpha=stackalpha,step='post',colors=self.plotcolors)
-        ax.stackplot(periods,-np.concatenate((Hn,np.array([Hn[:,-1]]).T),axis=1), alpha=stackalpha,step='post',colors=self.plotcolors)
+        fig, ax = plt.subplots(figsize=(10,6))
+        ax.stackplot(periods,scaling*np.concatenate((Hp,np.array([Hp[:,-1]]).T),axis=1),labels=genlabels, alpha=stackalpha,step='post',colors=self.plotcolors)
+        ax.stackplot(periods,-scaling*np.concatenate((Hn,np.array([Hn[:,-1]]).T),axis=1), alpha=stackalpha,step='post',colors=self.plotcolors)
         
-        ax.step(periods,np.append(RTp,RTp[-1]),color="teal",linestyle='--',label=r"$R^+_T$",where='post')
-        ax.step(periods,-np.append(RTn,RTn[-1]),color="teal",linestyle='--',label=r"$R^-_T$",where='post')
+        ax.step(periods,scaling*np.append(RTp,RTp[-1]),color="teal",linestyle='--',label=r"$R^+_T$",where='post')
+        ax.step(periods,-scaling*np.append(RTn,RTn[-1]),color="teal",linestyle='--',label=r"$R^-_T$",where='post')
 
         ax.axhline(0,color='black',lw=1)
         ax.set_xticks(periods)
-        ax.set_xlim((0,T-1))
+        ax.set_xlim((0,T))
         ax.set_xlabel('Tiempo (h)')
         ax.set_ylabel("Holgura (kW)")
-        fig.legend(loc='upper left',bbox_to_anchor=(0.07,0.97),frameon=True)
+        fig.legend(loc='upper left',bbox_to_anchor=(0.09,0.97),frameon=True)
         fig.set_dpi(500)
         plt.tight_layout()
         plt.show()
@@ -1824,7 +2002,7 @@ class detEDnR(EDnR):
         super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,
                             plotcolors,seed,grb_verbose,logger_scope,logger_level,LastInstance,model_name,**kwargs)
 
-    def solve(self,TrainSampleSet=None,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,reservecost_wrt_gencost=0.4,**kwargs):
+    def solve(self,TrainSampleSet=None,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,rho=None,plot_ED=False,reservecost_wrt_gencost=0.4,**kwargs):
         """Solve deterministic EDnR. Does heuristic_reserve() then BaseDetED(), but
         takes an input training sample set to calculate avg/exp day, to be used as nominal day,
         **updating instance parameters (demand and Type 3 generation).**
@@ -1855,7 +2033,7 @@ class detEDnR(EDnR):
         ReserveResult.Rcost=reservecost_wrt_gencost*np.sum(c_gen_copkwh_w_bess*(ReserveResult.H_p+ReserveResult.H_n))*self.T
         
         # Realizar ED con cotas definidas y obtener costos (D-1) de Despacho y Reserva
-        EDResult=self.detED(EDparams,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs)
+        EDResult=self.detED(EDparams,lambdas_C,lambdas_V,z_PC,z_PV,rho,**kwargs)
         if EDResult==-1: return None,-1
 
         # Combinar resultados de ED + R
@@ -1866,7 +2044,7 @@ class detEDnR(EDnR):
         J_is=x_dec.EDnRcost # ObjVal is just EDcost in det
         return x_dec,J_is
     
-    def detED(self,params={},lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
+    def detED(self,params={},lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,rho=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
         """Meant to be called after heuristic_reserve(). Solves deterministic ED with params (can be {}) and
         instance creation parameters. Returns object with {Pgen[GxT],PBESS[
             T],SOE[T],EDcost}."""
@@ -1902,24 +2080,35 @@ class detEDnR(EDnR):
             # Add BESS Vars
             pCH=M.addMVar(shape=(T),lb=0,ub=p_ch_max_bess_kw)
             pDC=M.addMVar(shape=(T),lb=0,ub=p_dc_max_bess_kw)
-            SOE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
+            SoE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
             # Add BESS [cRT*pDC] TO OBJECTIVE FUNCTION
             for t in range(T):
                 self.fobj+=self.c_chdc_copkwh*(pDC[t]+1/10*pCH[t]) # 1/20 is to slightly penalize charging
             # Add BESS Constraints
-            sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(p_ch_max_bess_kw,p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
-            SOEdynamics=M.addConstrs((SOE[t+1]==SOE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
+            SOEdynamics=M.addConstrs((SoE[t+1]==SoE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
             if self.strictlycircularbess:
-                SOEcircular=M.addConstr(SOE[0]==SOE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
+                SOEcircular=M.addConstr(SoE[0]==SoE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
             else:    
-                SOEstartcond=M.addConstr(SOE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
-                SOEendcond=M.addConstr(SOE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
-                etacutplane=(self.eta_ch+1/self.eta_dc)/2
-                SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
+                SOEstartcond=M.addConstr(SoE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
+                SOEendcond=M.addConstr(SoE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
+            if self.enforceBinaryBESS:
+                binCH=M.addMVar(shape=(T),vtype=GRB.BINARY,name="binCH")
+                binDC=M.addMVar(shape=(T),vtype=GRB.BINARY,name="binDC")
+                #binCH+binDC<=1 forall t
+                ChDcMutex=M.addConstr(binCH + binDC<=np.ones(T),"ChDcMutex")
+                #pCH<=pCHmax*binCH
+                pCH_binLim=M.addConstr(pCH <= binCH*p_ch_max_bess_kw,"pCH_binLim")
+                #pDC<=pDCmax*binDC
+                pDC_binLim=M.addConstr(pDC <= binDC*p_dc_max_bess_kw,"pDC_binLim")
+            else:
+                sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(p_ch_max_bess_kw,p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
+                if not self.strictlycircularbess:
+                    etacutplane=(self.eta_ch+1/self.eta_dc)/2
+                    SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
             # make var/ctrt handlers accessible as attributes   
             self.pCH=pCH
             self.pDC=pDC
-            self.SOE=SOE   
+            self.SOE=SoE   
             GenBal+=pDC-pCH 
                         
         # FOR ADMM MODE, THE RESOLVE WRAPPER UPDATES RHS of z_PV_ctrt, z_PC_ctrt, lam_C_ctrt, lam_V_ctrt
@@ -1927,46 +2116,16 @@ class detEDnR(EDnR):
             if self.neighbors==[]:
                 raise Exception("transactive EDnR requires neighbors list")
             else:
-                # Z AND LAMBDAS MUST BE GIVEN 
-                assert z_PC is not None, f"z_PC is None"
-                assert z_PV is not None, f"z_PV is None"
-                assert lambdas_C is not None, f"lambdas_C is None"
-                assert lambdas_V is not None, f"lambdas_V is None"
-                self.z_PC_k=z_PC
-                self.z_PV_k=z_PV
-                self.lam_C_k=lambdas_C
-                self.lam_V_k=lambdas_V
-                # Add P compras and P ventas variables to model
-                P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
-                P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
-                
-                # Add ADMM params as variables == constant RHS to update in resolve()
-                z_PC_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
-                z_PV_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
-                
-                self.z_PC_ctrt=M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
-                self.z_PV_ctrt=M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
-                
-                lam_C_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_C") # lambda compras
-                lam_V_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_V") # lambda ventas   
-                self.lam_C_ctrt=M.addConstr(lam_C_var==self.lam_C_k,"lam_C_const")
-                self.lam_V_ctrt=M.addConstr(lam_V_var==self.lam_V_k,"lam_V_const")
-                
-                for t in range(T):
-                    for j in range(self.lenneighbors): #list of MG indices
-                        ### METER INTERCAMBIOS EN FUNCION OBJETIVO
-                        self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C[j,t]-lam_C_var[j,t]*P_V[j,t]
-                        self.fobj+=(self.rho/2)*((P_C[j,t]-z_PC_var[j,t])*(P_C[j,t]-z_PC_var[j,t])+(P_V[j,t]-z_PV_var[j,t])*(P_V[j,t]-z_PV_var[j,t]))
-                self.P_C=P_C
-                self.P_V=P_V
-            ### METER INTERCAMBIOS EN BALANCE DE CARGA
-            GenBal+=P_C.sum(axis=0)-P_V.sum(axis=0)
-        
+                self.setupTransactive(z_PC,z_PV,lambdas_C,lambdas_V,GenBal,rho)
+
         ### LOAD BALANCE CONSTRAINT
         self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
         
         M.Params.QCPDual=1
-        M.setObjective(self.fobj, GRB.MINIMIZE)
+        if self.transactive:
+            M.setObjective(self.fobj+(self.rho_k/2)*self.admmPenalty, GRB.MINIMIZE)
+        else:
+            M.setObjective(self.fobj, GRB.MINIMIZE)
         self.logger.debug("solving...")
         try:
             M.optimize()
@@ -1993,28 +2152,31 @@ class detEDnR(EDnR):
         # Build Result Object
         result=SimpleNamespace()
         result.ObjVal=M.ObjVal
-        if self.needMPO: result.MPO=self.loadbalanceCtrt.Pi
+        # GETTING THE DUALS
+        if self.needMPO:
+            result.MPO=self.getMPO()
         result.Pgen=pG.X
 
         if self.transactive:
-            result.P_C=P_C.X
-            result.P_V=P_V.X
+            result.P_C=self.P_C.X
+            result.P_V=self.P_V.X
         
         if self.HAS_BESS:
             pCH_res=pCH.X
             pDC_res=pDC.X
-            SOE_res=SOE.X
+            SOE_res=SoE.X
             result.PCH=pCH_res
             result.PDC=pDC_res
             result.PBESS=pDC_res-pCH_res
             result.SOE=SOE_res
             for t in range(T):
-                if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-                    self.logger.warning(f"t={t}")
-                    self.logger.warning(f"pCH_res: {pCH_res[:t+1]}")
-                    self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
-                    self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
-                    raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
+                if(pCH_res[t]>self.Pthresh and pDC_res[t]>self.Pthresh) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
+                    self.logger.error(f"t={t}")
+                    self.logger.error(f"pCH_res: {pCH_res[:t+1]}")
+                    self.logger.error(f"pDC_res: {pDC_res[:t+1]}")
+                    self.logger.error(f"SOE_res: {SOE_res[:t+1]}")
+                    if not self.turnOffBatteryFeasException:
+                        raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
         
         ## CALCULATE REAL COST OF ED+R [D-1] PLANNING: ED, R, PURCHASES AND SALES
         Cost_of_ED=0
@@ -2028,11 +2190,11 @@ class detEDnR(EDnR):
             if self.transactive:
                 for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
-                    if result.P_C[j,t]>1e-2:
+                    if result.P_C[j,t]>self.Pthresh:
                         Cost_of_ED+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
                     # if actually selling, sub LAM * P_V
-                    if result.P_V[j,t]>1e-2:
-                        Cost_of_ED-=self.lam_V_k[j,t]*result.P_V[j,t]        
+                    if result.P_V[j,t]>self.Pthresh:
+                        Cost_of_ED+=self.lam_V_k[j,t]*result.P_V[j,t]        
         result.EDcost=Cost_of_ED
         # Si se corre desde solve, se le suma Rcost para obtener EDnRcost
         return result
@@ -2044,7 +2206,7 @@ class SEDnR(EDnR):
                  plotcolors=None,seed=None,grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,**kwargs):
         super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,plotcolors,seed,grb_verbose,logger_scope,logger_level,LastInstance,model_name,**kwargs)
         
-    def solve(self,TrainSampleSet,reservecost_wrt_gencost=0.4,Q=100,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
+    def solve(self,TrainSampleSet,reservecost_wrt_gencost=0.4,Q=100,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,rho=None,plot_ED=False,**kwargs):
         """Solve Stochastic EDnR. Returns decision x_dec=EDnRresult object with {Pgen[GxT],PBESS[T],SOE[T],fpart,
         ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,EDcost,Rcost}, and in-sample performance Jis=ED+R cost + predicted[Op] cost [D-1]
 
@@ -2082,7 +2244,7 @@ class SEDnR(EDnR):
         Ximax,Ximin=self.BoundsFromSet(XiScenarioSet,Q)
 
         # Llama solve_stochastic con las reservas maximas y los escenarios de variacion
-        x_dec=self.solve_stochastic(XiScenarioSet,Ximax,Ximin,SEDnRparams,reservecost_wrt_gencost,Q,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs) ## ED AND R RESULTS
+        x_dec=self.solve_stochastic(XiScenarioSet,Ximax,Ximin,SEDnRparams,reservecost_wrt_gencost,Q,lambdas_C,lambdas_V,z_PC,z_PV,rho,**kwargs) ## ED AND R RESULTS
         if x_dec==-1: return None,-1
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
@@ -2091,7 +2253,7 @@ class SEDnR(EDnR):
         J_is=x_dec.ObjVal 
         return x_dec,J_is
     
-    def solve_stochastic(self,XiScenarioSet,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
+    def solve_stochastic(self,XiScenarioSet,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,rho=None,grb_verbose=None,BESS_SOE_init=None,**kwargs):
         """
         Meant to be called by solve(). Solves Stochastic ED (SAA) with params (can be {}) and
         instance creation parameters. Returns EDnR object with {Pgen[GxT],PBESS[T],SOE[T],EDcost,fpart,
@@ -2156,9 +2318,13 @@ class SEDnR(EDnR):
             # Add BESS Vars
             pCH=M.addMVar(shape=(T),lb=0,ub=GRB.INFINITY)
             pDC=M.addMVar(shape=(T),lb=0,ub=GRB.INFINITY)
-            SOE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
+            SoE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
             
             # Ideally pDCmax=M.addConstrs((pDC[t]<=max(self.p_dc_max_bess_kw-Rp[-1,t],0)) for t in range(T)), same for pCH
+            # what if pdc <= max(pdcmax - Rp, 0) is transformed to pdc <= pdcmax - Rp
+            # if pdcmax - Rp = 0, 0<=pdc<=0 vs 0<=pdc=0, pdc=0 can happen, just no int point
+            # if pdcmax - Rp < 0 , 0<=pdc<0 vs 0<=pdc<=0, first is unfeasible, hence assigning Rp>pdcmax unfeasible! not cool
+            # if pdcmax - Rp >0, equivalent
             p_ch_max_clip=M.addMVar(shape=(T),lb=-GRB.INFINITY,ub=GRB.INFINITY)
             p_dc_max_clip=M.addMVar(shape=(T),lb=-GRB.INFINITY,ub=GRB.INFINITY)
             _aux_ch=M.addMVar(shape=(T),lb=-GRB.INFINITY,ub=GRB.INFINITY)
@@ -2177,19 +2343,30 @@ class SEDnR(EDnR):
                 self.fobj+=reservecost_wrt_gencost*self.c_chdc_copkwh*(Rp[-1,t]+Rn[-1,t])
                         
             # Add BESS Constraints
-            sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(self.p_ch_max_bess_kw,self.p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
-            SOEdynamics=M.addConstrs((SOE[t+1]==SOE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
+            SOEdynamics=M.addConstrs((SoE[t+1]==SoE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
             if self.strictlycircularbess:
-                SOEcircular=M.addConstr(SOE[0]==SOE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
+                SOEcircular=M.addConstr(SoE[0]==SoE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
             else:    
-                SOEstartcond=M.addConstr(SOE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
-                SOEendcond=M.addConstr(SOE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
-                etacutplane=(self.eta_ch+1/self.eta_dc)/2
-                SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
+                SOEstartcond=M.addConstr(SoE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
+                SOEendcond=M.addConstr(SoE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
+            if self.enforceBinaryBESS:
+                binCH=M.addMVar(shape=(T),vtype=GRB.BINARY,name="binCH")
+                binDC=M.addMVar(shape=(T),vtype=GRB.BINARY,name="binDC")
+                #binCH+binDC<=1 forall t
+                ChDcMutex=M.addConstr(binCH + binDC<=np.ones(T),"ChDcMutex")
+                #pCH<=pCHmax*binCH
+                pCH_binLim=M.addConstr(pCH <= binCH*self.p_ch_max_bess_kw,"pCH_binLim")
+                #pDC<=pDCmax*binDC
+                pDC_binLim=M.addConstr(pDC <= binDC*self.p_dc_max_bess_kw,"pDC_binLim")
+            else:
+                sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(self.p_ch_max_bess_kw,self.p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
+                if not self.strictlycircularbess:
+                    etacutplane=(self.eta_ch+1/self.eta_dc)/2
+                    SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
             # make var/ctrt handlers accessible as attributes
             self.pCH=pCH
             self.pDC=pDC
-            self.SOE=SOE   
+            self.SOE=SoE   
             GenBal+=pDC-pCH 
             c_gen_copkwh_w_bess=np.append(c_gen_copkwh_w_bess,self.c_chdc_copkwh)
     
@@ -2207,46 +2384,16 @@ class SEDnR(EDnR):
             if self.neighbors==[]:
                 raise Exception("transactive EDnR requires neighbors list")
             else:
-                # Z AND LAMBDAS MUST BE SET
-                assert z_PC is not None, f"z_PC is None"
-                assert z_PV is not None, f"z_PV is None"
-                assert lambdas_C is not None, f"lambdas_C is None"
-                assert lambdas_V is not None, f"lambdas_V is None"
-                self.z_PC_k=z_PC
-                self.z_PV_k=z_PV
-                self.lam_C_k=lambdas_C
-                self.lam_V_k=lambdas_V
-                # Add P compras and P ventas variables to model
-                P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
-                P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
-                
-                # Add ADMM params as variables == constant RHS to update in resolve()
-                z_PC_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
-                z_PV_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
-                
-                self.z_PC_ctrt=M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
-                self.z_PV_ctrt=M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
-                
-                lam_C_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_C") # lambda compras
-                lam_V_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_V") # lambda ventas   
-                self.lam_C_ctrt=M.addConstr(lam_C_var==self.lam_C_k,"lam_C_const")
-                self.lam_V_ctrt=M.addConstr(lam_V_var==self.lam_V_k,"lam_V_const")
-                
-                for t in range(T):
-                    for j in range(self.lenneighbors): #list of MG indices
-                        ### METER INTERCAMBIOS EN FUNCION OBJETIVO
-                        self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C[j,t]-lam_C_var[j,t]*P_V[j,t]
-                        self.fobj+=(self.rho/2)*((P_C[j,t]-z_PC_var[j,t])*(P_C[j,t]-z_PC_var[j,t])+(P_V[j,t]-z_PV_var[j,t])*(P_V[j,t]-z_PV_var[j,t]))
-                self.P_C=P_C
-                self.P_V=P_V
-            ### METER INTERCAMBIOS EN BALANCE DE CARGA
-            GenBal+=P_C.sum(axis=0)-P_V.sum(axis=0)
+                self.setupTransactive(z_PC,z_PV,lambdas_C,lambdas_V,GenBal,rho)
         
         ### LOAD BALANCE CONSTRAINT
         self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
         
         M.Params.QCPDual=1        
-        M.setObjective(self.fobj, GRB.MINIMIZE)
+        if self.transactive:
+            M.setObjective(self.fobj+(self.rho_k/2)*self.admmPenalty, GRB.MINIMIZE)
+        else:
+            M.setObjective(self.fobj, GRB.MINIMIZE)
         self.logger.debug("solving...")
         try:
             M.optimize()
@@ -2273,18 +2420,9 @@ class SEDnR(EDnR):
         # Build Result Object
         result=SimpleNamespace()
         result.ObjVal=M.ObjVal
-        # GETTING THE DUALS MAY BE A BIT HARDER WITH BATTERIES
+        # GETTING THE DUALS
         if self.needMPO:
-            try:
-                result.MPO=self.loadbalanceCtrt.Pi
-            except gp.GurobiError as e:
-                self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
-                fixedmodel=M.fixed()
-                fixedmodel.optimize()
-                fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
-                result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
-                assert len(result.MPO)==T and (result.MPO>0).all(),f"Invalid LMP/MPOs: {result.MPO}"
-
+            result.MPO=self.getMPO()
         result.Pgen=pG.X
         result.fpart=fpart.X
         result.H_p=Rp.X
@@ -2293,24 +2431,25 @@ class SEDnR(EDnR):
         result.ResT_n=np.sum(Rn.X,axis=0)
 
         if self.transactive:
-            result.P_C=P_C.X
-            result.P_V=P_V.X
+            result.P_C=self.P_C.X
+            result.P_V=self.P_V.X
         
         if self.HAS_BESS:
             pCH_res=pCH.X
             pDC_res=pDC.X
-            SOE_res=SOE.X
+            SOE_res=SoE.X
             result.PCH=pCH_res
             result.PDC=pDC_res
             result.PBESS=pDC_res-pCH_res
             result.SOE=SOE_res
             for t in range(T):
-                if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-                    self.logger.warning(f"t={t}")
-                    self.logger.warning(f"pCH_res: {pCH_res[:t+1]}")
-                    self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
-                    self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
-                    raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
+                if(pCH_res[t]>self.Pthresh and pDC_res[t]>self.Pthresh) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
+                    self.logger.error(f"t={t}")
+                    self.logger.error(f"pCH_res: {pCH_res[:t+1]}")
+                    self.logger.error(f"pDC_res: {pDC_res[:t+1]}")
+                    self.logger.error(f"SOE_res: {SOE_res[:t+1]}")
+                    if not self.turnOffBatteryFeasException:
+                        raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
 
         ## CALCULATE REAL COST OF ED+R [D-1] PLANNING: ED, R, PURCHASES AND SALES
         Cost_of_EDnR=0
@@ -2326,11 +2465,11 @@ class SEDnR(EDnR):
             if self.transactive:
                 for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
-                    if result.P_C[j,t]>1e-2:
+                    if result.P_C[j,t]>self.Pthresh:
                         Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
                     # if actually selling, sub LAM * P_V
-                    if result.P_V[j,t]>1e-2:
-                        Cost_of_EDnR-=self.lam_V_k[j,t]*result.P_V[j,t]
+                    if result.P_V[j,t]>self.Pthresh:
+                        Cost_of_EDnR+=self.lam_V_k[j,t]*result.P_V[j,t]
         result.EDnRcost=Cost_of_EDnR
         return result
     
@@ -2340,7 +2479,7 @@ class REDnR(EDnR):
                  plotcolors=None,seed=None,
                  grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,**kwargs):
         super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,plotcolors,seed,grb_verbose,logger_scope,logger_level,LastInstance,model_name=None,**kwargs)
-    def solve(self,TrainSampleSet,Q=100,reservecost_wrt_gencost=0.4,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
+    def solve(self,TrainSampleSet,Q=100,reservecost_wrt_gencost=0.4,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,rho=None,plot_ED=False,**kwargs):
         """
         Solve Robust EDnR. Returns decision x_dec=EDnRresult object with {Pgen[GxT],PBESS[T],SOE[T],fpart,
         ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,EDcost,Rcost}, and in-sample performance Jis=ED+R cost [D-1].
@@ -2366,7 +2505,7 @@ class REDnR(EDnR):
         Ximax,Ximin=self.BoundsFromSet(XiScenarioSet,Q)
                 
         # Llama solve_robust con las reservas maximas y los escenarios de variacion extremos
-        x_dec=self.solve_robust(Ximax,Ximin,REDnRparams,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs) ## ED AND R RESULTS
+        x_dec=self.solve_robust(Ximax,Ximin,REDnRparams,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,rho,**kwargs) ## ED AND R RESULTS
         if x_dec==-1: return None,-1
         if plot_ED:
             self.plotED(x_dec,**kwargs)  
@@ -2375,7 +2514,7 @@ class REDnR(EDnR):
         J_is=x_dec.ObjVal
         return x_dec,J_is     
        
-    def solve_robust(self,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,grb_verbose=None,BESS_SOE_init=None,**kwargs):
+    def solve_robust(self,Ximax,Ximin,params,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,rho,grb_verbose=None,BESS_SOE_init=None,**kwargs):
         """
         Meant to be called by solve(). Solves Robust EDnR with Quantile edge samples (can be {}) and
         instance creation parameters. Returns EDnR object with {Pgen[GxT],PBESS[T],SOE[T],EDcost,fpart,
@@ -2438,7 +2577,7 @@ class REDnR(EDnR):
             # Add BESS Vars
             pCH=M.addMVar(shape=(T),lb=0,ub=GRB.INFINITY)
             pDC=M.addMVar(shape=(T),lb=0,ub=GRB.INFINITY)
-            SOE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
+            SoE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
             
             # Ideally pDCmax=M.addConstrs((pDC[t]<=max(self.p_dc_max_bess_kw-Rp[-1,t],0)) for t in range(T)), same for pCH
             p_ch_max_clip=M.addMVar(shape=(T),lb=-GRB.INFINITY,ub=GRB.INFINITY)
@@ -2459,19 +2598,30 @@ class REDnR(EDnR):
                 self.fobj+=reservecost_wrt_gencost*self.c_chdc_copkwh*(Rp[-1,t]+Rn[-1,t])
                         
             # Add BESS Constraints
-            sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(self.p_ch_max_bess_kw,self.p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
-            SOEdynamics=M.addConstrs((SOE[t+1]==SOE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
+            SOEdynamics=M.addConstrs((SoE[t+1]==SoE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
             if self.strictlycircularbess:
-                SOEcircular=M.addConstr(SOE[0]==SOE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
+                SOEcircular=M.addConstr(SoE[0]==SoE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
             else:    
-                SOEstartcond=M.addConstr(SOE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
-                SOEendcond=M.addConstr(SOE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
-                etacutplane=(self.eta_ch+1/self.eta_dc)/2
-                SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
+                SOEstartcond=M.addConstr(SoE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
+                SOEendcond=M.addConstr(SoE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
+            if self.enforceBinaryBESS:
+                binCH=M.addMVar(shape=(T),vtype=GRB.BINARY,name="binCH")
+                binDC=M.addMVar(shape=(T),vtype=GRB.BINARY,name="binDC")
+                #binCH+binDC<=1 forall t
+                ChDcMutex=M.addConstr(binCH + binDC<=np.ones(T),"ChDcMutex")
+                #pCH<=pCHmax*binCH
+                pCH_binLim=M.addConstr(pCH <= binCH*self.p_ch_max_bess_kw,"pCH_binLim")
+                #pDC<=pDCmax*binDC
+                pDC_binLim=M.addConstr(pDC <= binDC*self.p_dc_max_bess_kw,"pDC_binLim")
+            else:
+                sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(self.p_ch_max_bess_kw,self.p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
+                if not self.strictlycircularbess:
+                    etacutplane=(self.eta_ch+1/self.eta_dc)/2
+                    SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
             # make var/ctrt handlers accessible as attributes
             self.pCH=pCH
             self.pDC=pDC
-            self.SOE=SOE   
+            self.SOE=SoE   
             GenBal+=pDC-pCH 
             c_gen_copkwh_w_bess=np.append(c_gen_copkwh_w_bess,self.c_chdc_copkwh)
     
@@ -2489,46 +2639,16 @@ class REDnR(EDnR):
             if self.neighbors==[]:
                 raise Exception("transactive EDnR requires neighbors list")
             else:
-                # Z AND LAMBDAS MUST BE SET
-                assert z_PC is not None, f"z_PC is None"
-                assert z_PV is not None, f"z_PV is None"
-                assert lambdas_C is not None, f"lambdas_C is None"
-                assert lambdas_V is not None, f"lambdas_V is None"
-                self.z_PC_k=z_PC
-                self.z_PV_k=z_PV
-                self.lam_C_k=lambdas_C
-                self.lam_V_k=lambdas_V
-                # Add P compras and P ventas variables to model
-                P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
-                P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
-                
-                # Add ADMM params as variables == constant RHS to update in resolve()
-                z_PC_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
-                z_PV_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
-                
-                self.z_PC_ctrt=M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
-                self.z_PV_ctrt=M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
-                
-                lam_C_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_C") # lambda compras
-                lam_V_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_V") # lambda ventas   
-                self.lam_C_ctrt=M.addConstr(lam_C_var==self.lam_C_k,"lam_C_const")
-                self.lam_V_ctrt=M.addConstr(lam_V_var==self.lam_V_k,"lam_V_const")
-                
-                for t in range(T):
-                    for j in range(self.lenneighbors): #list of MG indices
-                        ### METER INTERCAMBIOS EN FUNCION OBJETIVO
-                        self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C[j,t]-lam_C_var[j,t]*P_V[j,t]
-                        self.fobj+=(self.rho/2)*((P_C[j,t]-z_PC_var[j,t])*(P_C[j,t]-z_PC_var[j,t])+(P_V[j,t]-z_PV_var[j,t])*(P_V[j,t]-z_PV_var[j,t]))
-                self.P_C=P_C
-                self.P_V=P_V
-            ### METER INTERCAMBIOS EN BALANCE DE CARGA
-            GenBal+=P_C.sum(axis=0)-P_V.sum(axis=0)
+                self.setupTransactive(z_PC,z_PV,lambdas_C,lambdas_V,GenBal,rho)
                   
         ### LOAD BALANCE CONSTRAINT
         self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
 
         M.Params.QCPDual=1
-        M.setObjective(self.fobj, GRB.MINIMIZE)
+        if self.transactive:
+            M.setObjective(self.fobj+(self.rho_k/2)*self.admmPenalty, GRB.MINIMIZE)
+        else:
+            M.setObjective(self.fobj, GRB.MINIMIZE)
         self.logger.debug("solving...")
         try:
             M.optimize()
@@ -2555,18 +2675,9 @@ class REDnR(EDnR):
         # Build Result Object
         result=SimpleNamespace()
         result.ObjVal=M.ObjVal
-        # GETTING THE DUALS MAY BE A BIT HARDER WITH BATTERIES
+        # GETTING THE DUALS
         if self.needMPO:
-            try:
-                result.MPO=self.loadbalanceCtrt.Pi
-            except gp.GurobiError as e:
-                self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
-                fixedmodel=M.fixed()
-                fixedmodel.optimize()
-                fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
-                result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
-                assert len(result.MPO)==T and (result.MPO>0).all(),f"Invalid LMP/MPOs: {result.MPO}"
-
+            result.MPO=self.getMPO()
         result.Pgen=pG.X
         result.fpart=fpart.X
         result.H_p=Rp.X
@@ -2575,24 +2686,25 @@ class REDnR(EDnR):
         result.ResT_n=np.sum(Rn.X,axis=0)
 
         if self.transactive:
-            result.P_C=P_C.X
-            result.P_V=P_V.X
+            result.P_C=self.P_C.X
+            result.P_V=self.P_V.X
         
         if self.HAS_BESS:
             pCH_res=pCH.X
             pDC_res=pDC.X
-            SOE_res=SOE.X
+            SOE_res=SoE.X
             result.PCH=pCH_res
             result.PDC=pDC_res
             result.PBESS=pDC_res-pCH_res
             result.SOE=SOE_res
             for t in range(T):
-                if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-                    self.logger.warning(f"t={t}")
-                    self.logger.warning(f"pCH_res: {pCH_res[:t+1]}")
-                    self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
-                    self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
-                    raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
+                if(pCH_res[t]>self.Pthresh and pDC_res[t]>self.Pthresh) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
+                    self.logger.error(f"t={t}")
+                    self.logger.error(f"pCH_res: {pCH_res[:t+1]}")
+                    self.logger.error(f"pDC_res: {pDC_res[:t+1]}")
+                    self.logger.error(f"SOE_res: {SOE_res[:t+1]}")
+                    if not self.turnOffBatteryFeasException:
+                        raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
         
         ## CALCULATE REAL COST OF ED+R [D-1] PLANNING: ED, R, PURCHASES AND SALES
         Cost_of_EDnR=0
@@ -2608,11 +2720,11 @@ class REDnR(EDnR):
             if self.transactive:
                 for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
-                    if result.P_C[j,t]>1e-2:
+                    if result.P_C[j,t]>self.Pthresh:
                         Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
                     # if actually selling, sub LAM * P_V
-                    if result.P_V[j,t]>1e-2:
-                        Cost_of_EDnR-=self.lam_V_k[j,t]*result.P_V[j,t]        
+                    if result.P_V[j,t]>self.Pthresh:
+                        Cost_of_EDnR+=self.lam_V_k[j,t]*result.P_V[j,t]        
         result.EDnRcost=Cost_of_EDnR
         return result        
     
@@ -2622,7 +2734,7 @@ class DRWEDnR(EDnR):
                  grb_verbose:bool=False,logger_scope:int=1,logger_level:int=logging.CRITICAL,LastInstance=None,model_name=None,**kwargs):
         super().__init__(MG,subperiods,strictlycircularbess,BESS_SOE_init,plotcolors,seed,grb_verbose,logger_scope,logger_level,LastInstance,model_name,**kwargs)
         
-    def solve(self,TrainSampleSet,rwass=0.001,Q=100,reservecost_wrt_gencost=0.4,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,**kwargs):
+    def solve(self,TrainSampleSet,rwass=0.001,Q=100,reservecost_wrt_gencost=0.4,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,rho=None,plot_ED=False,**kwargs):
         """Solve Distributionally Robust Wasserstein EDnR. Returns decision x_dec=EDnRresult object
         with {Pgen[GxT],PBESS[T],SOE[T],fpart,ResT_p,ResT_n,R_HzMw,R_pu,H_p,H_n,EDcost,Rcost}, and in-sample performance Jis=ED+R cost [D-1].
 
@@ -2667,7 +2779,7 @@ class DRWEDnR(EDnR):
         Ximax,Ximin=self.BoundsFromSet(XiScenarioSet,Q)
         
         # Llama solve_dro con las reservas maximas y los escenarios de variacion extremos
-        x_dec=self.solve_drow(XiScenarioSet,Ximax,Ximin,rwass,DRWEDnRparams,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,**kwargs) ## ED AND R RESULTS
+        x_dec=self.solve_drow(XiScenarioSet,Ximax,Ximin,rwass,DRWEDnRparams,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,rho,**kwargs) ## ED AND R RESULTS
         if x_dec==-1: return None,-1
         # convierte el resultado Jis
         # J_is=x_dec.EDnRcost #nope, this is for Joos
@@ -2676,7 +2788,7 @@ class DRWEDnR(EDnR):
             self.plotED(x_dec,**kwargs)  
         return x_dec,J_is
     
-    def solve_drow(self,XiScenarioSet,Ximax,Ximin,rwass,params,reservecost_wrt_gencost,lambdas_C=None,lambdas_V=None,z_PC=None,z_PV=None,plot_ED=False,grb_verbose=None,BESS_SOE_init=None,**kwargs):
+    def solve_drow(self,XiScenarioSet,Ximax,Ximin,rwass,params,reservecost_wrt_gencost,lambdas_C,lambdas_V,z_PC,z_PV,rho,grb_verbose=None,BESS_SOE_init=None,**kwargs):
         """
         Meant to be called by solve(). Solves Wasserstein Distributionally Robust EDnR with params (can be {}) and
         instance creation parameters. Returns EDnR object with {Pgen[TxNg],PBESS[T],SOE[T],fpart[Tx(Ng+1)],
@@ -2741,7 +2853,7 @@ class DRWEDnR(EDnR):
             # Add BESS Vars
             pCH=M.addMVar(shape=(T),lb=0,ub=GRB.INFINITY)
             pDC=M.addMVar(shape=(T),lb=0,ub=GRB.INFINITY)
-            SOE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
+            SoE=M.addMVar(shape=(T),lb=minSOE_perc*self.CE_bess_kwh,ub=maxSOE_perc*self.CE_bess_kwh)
             
             # Ideally pDCmax=M.addConstrs((pDC[t]<=max(self.p_dc_max_bess_kw-Rp[-1,t],0)) for t in range(T)), same for pCH
             p_ch_max_clip=M.addMVar(shape=(T),lb=-GRB.INFINITY,ub=GRB.INFINITY)
@@ -2762,19 +2874,30 @@ class DRWEDnR(EDnR):
                 self.fobj+=reservecost_wrt_gencost*self.c_chdc_copkwh*(Rp[-1,t]+Rn[-1,t])
                         
             # Add BESS Constraints
-            sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(self.p_ch_max_bess_kw,self.p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
-            SOEdynamics=M.addConstrs((SOE[t+1]==SOE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
+            SOEdynamics=M.addConstrs((SoE[t+1]==SoE[t]+self.deltat_h*(pCH[t+1]*self.eta_ch-pDC[t+1]/self.eta_dc) for t in range(T-1)),"SOEdynamics")
             if self.strictlycircularbess:
-                SOEcircular=M.addConstr(SOE[0]==SOE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
+                SOEcircular=M.addConstr(SoE[0]==SoE[T-1]+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEcircular")
             else:    
-                SOEstartcond=M.addConstr(SOE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
-                SOEendcond=M.addConstr(SOE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
-                etacutplane=(self.eta_ch+1/self.eta_dc)/2
-                SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
+                SOEstartcond=M.addConstr(SoE[0]==self.BESS_SOE_init*self.CE_bess_kwh+self.deltat_h*(pCH[0]*self.eta_ch-pDC[0]/self.eta_dc),"SOEstartcond")
+                SOEendcond=M.addConstr(SoE[T-1]>=self.BESS_SOE_init*self.CE_bess_kwh,"SOEendcond")
+            if self.enforceBinaryBESS:
+                binCH=M.addMVar(shape=(T),vtype=GRB.BINARY,name="binCH")
+                binDC=M.addMVar(shape=(T),vtype=GRB.BINARY,name="binDC")
+                #binCH+binDC<=1 forall t
+                ChDcMutex=M.addConstr(binCH + binDC<=np.ones(T),"ChDcMutex")
+                #pCH<=pCHmax*binCH
+                pCH_binLim=M.addConstr(pCH <= binCH*self.p_ch_max_bess_kw,"pCH_binLim")
+                #pDC<=pDCmax*binDC
+                pDC_binLim=M.addConstr(pDC <= binDC*self.p_dc_max_bess_kw,"pDC_binLim")
+            else:
+                sumOfChDc=M.addConstrs((pCH[t]+pDC[t]<=min(self.p_ch_max_bess_kw,self.p_dc_max_bess_kw) for t in range(T)),"sumOfChDcCutPlane")
+                if not self.strictlycircularbess:
+                    etacutplane=(self.eta_ch+1/self.eta_dc)/2
+                    SOEcutplane=M.addConstrs((self.BESS_SOE_init+etacutplane*self.deltat_h*gp.quicksum(pCH[k]-pDC[k] for k in range(t-1))<=maxSOE_perc*self.CE_bess_kwh for t in range(T-1)),"SOEdynamics")
             # make var/ctrt handlers accessible as attributes
             self.pCH=pCH
             self.pDC=pDC
-            self.SOE=SOE   
+            self.SOE=SoE   
             GenBal+=pDC-pCH 
             c_gen_copkwh_w_bess=np.append(c_gen_copkwh_w_bess,self.c_chdc_copkwh)
     
@@ -2807,46 +2930,16 @@ class DRWEDnR(EDnR):
             if self.neighbors==[]:
                 raise Exception("transactive EDnR requires neighbors list")
             else:
-                # Z AND LAMBDAS MUST BE SET
-                assert z_PC is not None, f"z_PC is None"
-                assert z_PV is not None, f"z_PV is None"
-                assert lambdas_C is not None, f"lambdas_C is None"
-                assert lambdas_V is not None, f"lambdas_V is None"
-                self.z_PC_k=z_PC
-                self.z_PV_k=z_PV
-                self.lam_C_k=lambdas_C
-                self.lam_V_k=lambdas_V
-                # Add P compras and P ventas variables to model
-                P_C=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_C") # P compras
-                P_V=M.addMVar(shape=((self.lenneighbors,T)),lb=0,ub=np.vstack([self.lineCapacities for _ in range(T)]).T,name="P_V") # P ventas
-                
-                # Add ADMM params as variables == constant RHS to update in resolve()
-                z_PC_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PC") # consensus P compras
-                z_PV_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="z_PV") # consensus P ventas
-
-                self.z_PC_ctrt=M.addConstr(z_PC_var==self.z_PC_k,"z_PC_const")
-                self.z_PV_ctrt=M.addConstr(z_PV_var==self.z_PV_k,"z_PV_const")
-                
-                lam_C_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_C") # lambda compras
-                lam_V_var=M.addMVar(shape=((self.lenneighbors,T)),lb=-GRB.INFINITY,ub=GRB.INFINITY,name="lam_V") # lambda ventas   
-                self.lam_C_ctrt=M.addConstr(lam_C_var==self.lam_C_k,"lam_C_const")
-                self.lam_V_ctrt=M.addConstr(lam_V_var==self.lam_V_k,"lam_V_const")
-
-                for t in range(T):
-                    for j in range(self.lenneighbors): #list of MG indices
-                        ### METER INTERCAMBIOS EN FUNCION OBJETIVO
-                        self.fobj+=(lam_C_var[j,t]+self.lineCosts)*P_C[j,t]-lam_C_var[j,t]*P_V[j,t]
-                        self.fobj+=(self.rho/2)*((P_C[j,t]-z_PC_var[j,t])*(P_C[j,t]-z_PC_var[j,t])+(P_V[j,t]-z_PV_var[j,t])*(P_V[j,t]-z_PV_var[j,t]))
-                self.P_C=P_C
-                self.P_V=P_V
-            ### METER INTERCAMBIOS EN BALANCE DE CARGA
-            GenBal+=P_C.sum(axis=0)-P_V.sum(axis=0)
+                self.setupTransactive(z_PC,z_PV,lambdas_C,lambdas_V,GenBal,rho)
                   
         ### LOAD BALANCE CONSTRAINT
         self.loadbalanceCtrt=M.addConstr(GenBal==self.demand_curve_kw,"loadbalance")
 
         M.Params.QCPDual=1
-        M.setObjective(self.fobj, GRB.MINIMIZE)
+        if self.transactive:
+            M.setObjective(self.fobj+(self.rho_k/2)*self.admmPenalty, GRB.MINIMIZE)
+        else:
+            M.setObjective(self.fobj, GRB.MINIMIZE)
         self.logger.debug("solving...")
         try:
             M.optimize()
@@ -2873,18 +2966,9 @@ class DRWEDnR(EDnR):
         # Build Result Object
         result=SimpleNamespace()
         result.ObjVal=M.ObjVal
-        # GETTING THE DUALS MAY BE A BIT HARDER IN DROW
+        # GETTING THE DUALS
         if self.needMPO:
-            try:
-                result.MPO=self.loadbalanceCtrt.Pi
-            except gp.GurobiError as e:
-                self.logger.critical(f"Couldnt get LMP/MPO as Pi - {e}, trying from fixed model")
-                fixedmodel=M.fixed()
-                fixedmodel.optimize()
-                fixedctrs_=[fixedmodel.getConstrByName(n) for n in self.loadbalanceCtrt.ConstrName]
-                result.MPO=np.array(list(map(lambda c: c.Pi, fixedctrs_)))
-                assert len(result.MPO)==T and (result.MPO>0).all(),f"Invalid LMP/MPOs: {result.MPO}"
-
+            result.MPO=self.getMPO()
         result.Pgen=pG.X
         result.fpart=fpart.X
         result.H_p=Rp.X
@@ -2894,24 +2978,25 @@ class DRWEDnR(EDnR):
         result.kappa=kappa.X
 
         if self.transactive:
-            result.P_C=P_C.X
-            result.P_V=P_V.X
+            result.P_C=self.P_C.X
+            result.P_V=self.P_V.X
         
         if self.HAS_BESS:
             pCH_res=pCH.X
             pDC_res=pDC.X
-            SOE_res=SOE.X
+            SOE_res=SoE.X
             result.PCH=pCH_res
             result.PDC=pDC_res
             result.PBESS=pDC_res-pCH_res
             result.SOE=SOE_res
             for t in range(T):
-                if(pCH_res[t] > 1e-2 and pDC_res[t]>1e-2) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
-                    self.logger.warning(f"t={t}")
-                    self.logger.warning(f"pCH_res: {pCH_res[:t+1]}")
-                    self.logger.warning(f"pDC_res: {pDC_res[:t+1]}")
-                    self.logger.warning(f"SOE_res: {SOE_res[:t+1]}")
-                    raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
+                if(pCH_res[t]>self.Pthresh and pDC_res[t]>self.Pthresh) and (pCH_res[t]/pDC_res[t]>0.33 and pCH_res[t]/pDC_res[t]<3):
+                    self.logger.error(f"t={t}")
+                    self.logger.error(f"pCH_res: {pCH_res[:t+1]}")
+                    self.logger.error(f"pDC_res: {pDC_res[:t+1]}")
+                    self.logger.error(f"SOE_res: {SOE_res[:t+1]}")
+                    if not self.turnOffBatteryFeasException:
+                        raise Exception(f"Battery is charging and discharging at same time t={t} for some reason")
 
         ## CALCULATE REAL COST OF ED+R [D-1] PLANNING: ED, R, PURCHASES AND SALES
         Cost_of_EDnR=0
@@ -2927,11 +3012,11 @@ class DRWEDnR(EDnR):
             if self.transactive:
                 for j in range(self.lenneighbors):
                     # if actually buying, add (LAM+lineCost) * P_C
-                    if result.P_C[j,t]>1e-2:
+                    if result.P_C[j,t]>self.Pthresh:
                         Cost_of_EDnR+=(self.lam_C_k[j,t]+self.lineCosts)*result.P_C[j,t]
                     # if actually selling, sub LAM * P_V
-                    if result.P_V[j,t]>1e-2:
-                        Cost_of_EDnR-=self.lam_V_k[j,t]*result.P_V[j,t]        
+                    if result.P_V[j,t]>self.Pthresh:
+                        Cost_of_EDnR+=self.lam_V_k[j,t]*result.P_V[j,t]        
         result.EDnRcost=Cost_of_EDnR
         return result           
 
@@ -2944,13 +3029,15 @@ class DRWEDnR(EDnR):
 # option 3: init ADMM to config
 class ADMMexchange:
     def __init__(self,MGs:list[MG],methods:list[str],trainingsamplesets:list,ednrparams:list[dict],
-                neighbors:dict[int,list[int]],linecosts:float,lineCaps:dict[tuple[int,int],float|int],
+                neighbors:dict[int,list[int]],linecosts:float,lineCaps:dict[tuple[int,int],float],
                 rho:float|int,max_iters:int=1000,error_threshold=1E-6,
-                P_C={}, P_V={},     
-                z_PC={}, z_PV={},   
-                lam_C={}, lam_V={}, 
+                # p_C={}, p_V={},     
+                # z_PC={}, z_PV={},   
+                # lam_C={}, lam_V={}, 
                 state_init={},
-                x_0=0,z_0=0,lam_0=0,
+                adaptivePenalty=False,adaptiveThresh=10,adaptiveMult=2,
+                StopAdaptingAt=2000,adaptiveWindow=1,adaptiveModDelay=1,
+                x_0=0,z_0=0,lam_0=0,kmod:int=1,
                 logger_level=logging.CRITICAL):
         """
             :param MGs:
@@ -2968,25 +3055,30 @@ class ADMMexchange:
             :param lineCaps:
               (dict[tuple[int,int],float | int]): Map of max P to transport in kW for each line. E.g. {(2,3):2000,(1,2):1000}
             :param rho:
-              (float | int): ADMM parameter for convergence tuning.
+              (float | int): ADMM parameter for convergence tuning (starting Rho in Adaptive Mode).
             :param max_iters:
               (int, optional): Defaults to 1000.
             :param error_threshold:
               (float, optional): Defaults to 1E-6. Convergence threshold for the sum of N residuals.
-            :param P_C,P_V:
-              (dict, optional): Defaults to {}. Initial values for exchanges (x0).
-            :param z_PC,z_PV:
-              (dict, optional): Defaults to {}. Initial values for consensus variables (z0).
-            :param lam_C,lam_V:
-              (dict, optional): Defaults to {}. Initial values for dual variables (lambda0).
             :param state_init:
               (dict, optional): Defaults to {}. Initial state for warm start of MG solvers. Not implemented.
             :param x_0,z_0,lam_0:
               (int, optional): Defaults to 0. Initial values for (x0,z0,lambda0) to initialize uniformly.
+            :param adaptivePenalty:
+              (bool, optional): Defaults to False. Activate Adaptive Penalty Mode.
+            :param adaptiveThresh:
+              (int, optional): Defaults to 10. Residual Ratio Threshold.
+            :param adaptiveMult:
+              (int, optional): Defaults to 2. Multiplier for Rho.
+            :param StopAdaptingAt:
+              (int, optional): Defaults to 2000. After k=[this] rho is constant.
+            :param adaptiveWindow:
+              (int, optional): Defaults to 1. Moving Average to calculate ratio.
+            :param adaptiveModDelay:
+              (int, optional): Defaults to 1. Update Rho every [this] iterations
             :param logger_level:
-              (Literal, optional): Defaults to logging.CRITICAL.'
-
-        """
+              (Literal, optional): Defaults to logging.CRITICAL.
+        """        
         ## INIT LOGGER
         admmlogger=logging.getLogger("ADMM")
         logging.basicConfig(format="[%(lineno)2s - ADMM] %(message)s",force=True,stream=sys.stdout)
@@ -3006,10 +3098,9 @@ class ADMMexchange:
         admmlogger.warning("Testing detEDnR with MGs")
         for i,mg in enumerate(MGs):
             x,j=detEDnR(mg,**ednrparams[i]|{'logger_level':logging.CRITICAL}).solve(**ednrparams[i])
-            assert j!=-1, f"====TEST FAILED FOR MG{i}==="
+            assert j!=-1, f"====TEST FAILED FOR MG{i+1}==="
         logging.basicConfig(format="[%(lineno)2s - ADMM] %(message)s",force=True,stream=sys.stdout)
         admmlogger.warning("===Test successfull. Initializing MMG===")
-
 
         ## PARSING NEIGHBORS dict-of-lists into sets per line
         agents_idx={i+1 for i in range(len(MGs))}
@@ -3023,43 +3114,48 @@ class ADMMexchange:
                 directed_edges.add((i,j))
                 assert i != j, f"MG {i} cannot be neighbor to itself"
                 undirected_edges.add(tuple(sorted((i,j))))
-        
+        admmlogger.debug(f"directed_edges: {directed_edges}")
+        admmlogger.debug(f"undirected_edges: {undirected_edges}")
         ## PARSING ADMM INIT PARAMS 
         ## Inicializar x por vecino por agente
-        if P_C=={} or P_V=={}:
-            assert P_C==P_V, "both P_C and P_V should both be set (or not)"
-            for (i,j) in directed_edges:
-                P_C[(i,j)]=np.ones(T)*x_0
-                P_V[(i,j)]=np.ones(T)*x_0
-        else:
-            for (i,j) in directed_edges:
-                assert P_C.get((i,j)) is not None, f"P_C doesn't have {(i,j)}"
-                assert P_V.get((i,j)) is not None, f"P_V doesn't have {(i,j)}"
+        ## NO MANUAL STARTING POINT AVAILABLE FOR NOW.
+        p_C,p_V={},{}
+        z_PC,z_PV={},{}
+        lam_C,lam_V={},{}
+        # if p_C=={} or p_V=={}:
+        #     assert p_C==p_V, "both p_C and p_V should both be set (or not)"
+        for (i,j) in directed_edges:
+            p_C[(i,j)]=np.ones(T)*x_0
+            p_V[(i,j)]=np.ones(T)*x_0
+        # else:
+        #     for (i,j) in directed_edges:
+        #         assert p_C.get((i,j)) is not None, f"p_C doesn't have {(i,j)}"
+        #         assert p_V.get((i,j)) is not None, f"p_V doesn't have {(i,j)}"
 
         ## Inicializar z y lambdas por vecino por agente
-        if z_PC=={} or z_PV=={} or lam_C=={} or lam_V=={}:
-            assert z_PC==z_PV==lam_C==lam_V, "initial z and lambdas should all be set (or not)"
+        # if z_PC=={} or z_PV=={} or lam_C=={} or lam_V=={}:
+            # assert z_PC==z_PV==lam_C==lam_V, "initial z and lambdas should all be set (or not)"
             # admmlogger.debug(f"dual if: {[(i,j) for j in neighbors.get(i) for i in agents]} ")
             # dual if doesnt work, just does cartesian product!
-            for (i,j) in directed_edges:
-                z_PC[(i,j)]=np.ones(T)*z_0
-                z_PV[(i,j)]=np.ones(T)*z_0
-                lam_C[(i,j)]=np.ones(T)*lam_0
-                lam_V[(i,j)]=np.ones(T)*lam_0
-        else:
-            for (i,j) in directed_edges:
-                assert z_PC.get((i,j)) is not None, f"z_PC doesn't have {(i,j)}"
-                assert z_PV.get((i,j)) is not None, f"z_PV doesn't have {(i,j)}"
-                assert lam_C.get((i,j)) is not None, f"lam_C doesn't have {(i,j)}"
-                assert lam_V.get((i,j)) is not None, f"lam_V doesn't have {(i,j)}"
+        for (i,j) in directed_edges:
+            z_PC[(i,j)]=np.ones(T)*z_0
+            z_PV[(i,j)]=np.ones(T)*z_0
+            lam_C[(i,j)]=np.ones(T)*lam_0
+            lam_V[(i,j)]=np.ones(T)*lam_0
+        # else:
+        #     for (i,j) in directed_edges:
+        #         assert z_PC.get((i,j)) is not None, f"z_PC doesn't have {(i,j)}"
+        #         assert z_PV.get((i,j)) is not None, f"z_PV doesn't have {(i,j)}"
+        #         assert lam_C.get((i,j)) is not None, f"lam_C doesn't have {(i,j)}"
+        #         assert lam_V.get((i,j)) is not None, f"lam_V doesn't have {(i,j)}"
 
         # INITIAL STATE (e.g. WARM START PARAMS)
         state = {i: {} for i in agents_idx} if state_init=={} else state_init
 
         # Printing inputs
         admmlogger.debug(f"state_init has: {set(state_init.keys())}")
-        admmlogger.debug(f"P_C: {P_C}")
-        admmlogger.debug(f"P_V: {P_V}")
+        admmlogger.debug(f"p_C: {p_C}")
+        admmlogger.debug(f"p_V: {p_V}")
         admmlogger.debug(f"z_PC: {z_PC}")
         admmlogger.debug(f"z_PV: {z_PV}")
         admmlogger.debug(f"lam_C: {lam_C}")
@@ -3071,6 +3167,7 @@ class ADMMexchange:
         ADMMsolverinit_global={'transactive':True,'rho':rho,'lineCosts':linecosts}
         ADMMsolverinit={i:{'neighbors':neighbors[i], 'lineCapacities':lineCapsPerAgent[i]}
                         | ADMMsolverinit_global  for i in agents_idx}
+        admmlogger.debug(f"ADMMsolverinit:{ADMMsolverinit}")
         ## ====== BUILDING DICT OF AGENTS ======
         agents={}
         solvers=[]
@@ -3095,24 +3192,27 @@ class ADMMexchange:
         # Residuo Primal ||lambda_k+1 - lambda_k|| per k>=2
         # Residuo Dual ||z_k+1 - z_k|| per k>=2
         primal_hist = {idx:{"linf":[], 'l2':[]} for idx in agents_idx|{'sum'}}
-        dual_hist = {idx:{"linf":[], 'l2':[]} for idx in undirected_edges|{'sum'}}
-        P_C_hist = {(i,j):[] for (i,j) in directed_edges}
-        P_V_hist = {(i,j):[] for (i,j) in directed_edges}
+        dual_hist = {idx:{"linf":[], 'l2':[]} for idx in agents_idx|{'sum'}}
+        p_C_hist = {(i,j):[] for (i,j) in directed_edges}
+        p_V_hist = {(i,j):[] for (i,j) in directed_edges}
         lam_C_hist = {(i,j):[] for (i,j) in directed_edges}
         lam_V_hist = {(i,j):[] for (i,j) in directed_edges}
         # IN THIS CASE LIST OF DICTS
         # statehist=[{i:{},j:{}} , {...}] guarda copia del state por agente per iter
         x_state_hist = [] 
-        R_prim,R_dual={},{}
+        # R_prim,R_dual={},{}
+        if adaptivePenalty:
+            assert adaptiveThresh>1 and adaptiveMult>1, "adaptive params must be >1"
+            self.rho_hist=[]
 
         convergenceCondition=False
         k=0
         admmlogger.warning("Initialized. Starting ADMM")
 
         while(k<max_iters and not convergenceCondition):
-            admmlogger.warning(f"===== k: {k}=====")
-            admmlogger.debug(f"Prev P_C: {P_C}")
-            admmlogger.debug(f"Prev P_V: {P_V}")
+            admmlogger.info(f"===== Starting k: {k} =====")
+            admmlogger.debug(f"Prev p_C: {p_C}")
+            admmlogger.debug(f"Prev p_V: {p_V}")
             admmlogger.info("====Updating x====")
 
             # ---------- (1) ACTUALIZACIÓN x^k+1: usa z^k y lam^k (secuencial) ----------
@@ -3127,46 +3227,50 @@ class ADMMexchange:
                 lam_V_i = np.array([lam_V.get((i, j)) for j in neighbors.get(i)])
                 solver=config.get('solver')
                 params=config.get('solverparams') # |state[i]['param_x'] # may be useful for warm start 
-                
+                if k>0: 
+                    params["dontupdateTrainSample"]=True
+                    params["Q"]=None
+                    params["rwass"]=None
+
                 admmlogger.debug(f"z_PC_{i}: {z_PC_i}")
                 admmlogger.debug(f"z_PV_{i}: {z_PV_i}")
                 admmlogger.debug(f"lam_C_{i}: {lam_C_i}")
                 admmlogger.debug(f"lam_V_{i}: {lam_V_i}")
 
                 logging.basicConfig(format=f"[%(lineno)2s - MG{i} - %(funcName)2s] %(message)s",force=True,stream=sys.stdout)
-                xdec,jis = solver.solveOrResolve(**params,z_PC=z_PC_i,z_PV=z_PV_i,lambdas_C=lam_C_i,lambdas_V=lam_V_i) 
-                res={"P_C":{(i,j): xdec.P_C[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
-                    "P_V":{(i,j): xdec.P_V[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
-                    "state":{'xdec':{"Full EDnResult(...)"},"jis":jis}} # Que guardar para warm start
+                xdec,jis = solver.solveOrResolve(**params,z_PC=z_PC_i,z_PV=z_PV_i,lambdas_C=lam_C_i,lambdas_V=lam_V_i,rho=rho) 
+                res={"p_C":{(i,j): xdec.P_C[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
+                    "p_V":{(i,j): xdec.P_V[neigh_idx] for neigh_idx,j in enumerate(neighbors.get(i, []))},
+                    "state":{'xdec':{"Full EDnResult(...)"},"jis":jis,"EDnRcost":xdec.EDnRcost}} # Que guardar para warm start
                 # For history
                 logging.basicConfig(format="[%(lineno)2s - ADMM] %(message)s",force=True,stream=sys.stdout)
                 admmlogger.debug(f"res: {res}")
                 # Just for the final
                 res["state"]["xdec"]=xdec
-                # Actualiza P_C y P_V locales del agente i
-                for tup, val in res.get("P_C").items():
-                    P_C[tup] = deepcopy(val)
+                # Actualiza p_C y p_V locales del agente i
+                for tup, val in res.get("p_C").items():
+                    p_C[tup] = deepcopy(val)
                     # Guardar hist
-                    P_C_hist[tup].append(val)
-                for tup, val in res.get("P_V").items():
-                    P_V[tup] = deepcopy(val)
+                    p_C_hist[tup].append(val)
+                for tup, val in res.get("p_V").items():
+                    p_V[tup] = deepcopy(val)
                     # Guardar hist
-                    P_V_hist[tup].append(val)
+                    p_V_hist[tup].append(val)
 
                 # Warm start: guarda el nuevo estado del agente i
                 state[i] = deepcopy(res["state"])
                 del res
                 
             admmlogger.debug("----x results----")
-            admmlogger.debug(f"P_C: {P_C}")
-            admmlogger.debug(f"P_V: {P_V}")
+            admmlogger.debug(f"p_C: {p_C}")
+            admmlogger.debug(f"p_V: {p_V}")
 
             # Only Jis to history
             x_state_hist.append( {i:deepcopy(state[i]["jis"]) for i in agents} )
 
             # ---------- (2) ACTUALIZACIÓN z^k+1: usa x^{k+1} y lam^k ----------
             # Guarda z^k para residuales de consenso por agente
-            admmlogger.info("----Previous z----")
+            admmlogger.debug("----Previous z----")
             admmlogger.debug(f"z_PC: {z_PC}")
             admmlogger.debug(f"z_PV: {z_PV}")
             admmlogger.info("====Updating z====")
@@ -3175,10 +3279,10 @@ class ADMMexchange:
 
             for (i, j) in undirected_edges:
                 # Actualiza consensos una vez por linea
-                PVi_j  = P_V[(i, j)]
-                PCj_i  = P_C[(j, i)]
-                PCi_j  = P_C[(i, j)]
-                PVj_i  = P_V[(j, i)]
+                PVi_j  = p_V[(i, j)]
+                PCj_i  = p_C[(j, i)]
+                PCi_j  = p_C[(i, j)]
+                PVj_i  = p_V[(j, i)]
                 lVi_j  = lam_V[(i, j)]
                 lCj_i  = lam_C[(j, i)]
                 lCi_j  = lam_C[(i, j)]
@@ -3195,7 +3299,7 @@ class ADMMexchange:
             admmlogger.debug(f"z_PC: {z_PC}")
             admmlogger.debug(f"z_PV: {z_PV}")
             # ---------- (3) ACTUALIZACIÓN lam^k+1: usa P^{k+1} y z^{k+1} ----------
-            admmlogger.info("----Previous lam----")
+            admmlogger.debug("----Previous lam----")
             admmlogger.debug(f"lam_C: {lam_C}")
             admmlogger.debug(f"lam_V: {lam_V}")
             lam_C_prev = deepcopy(lam_C)
@@ -3204,16 +3308,16 @@ class ADMMexchange:
             admmlogger.info("====Updating lambda====")
             for i in agents:
                 for j in neighbors.get(i, []):
-                    lam_C[(i, j)] += rho * (P_C[(i, j)] - z_PC[(i, j)])
-                    lam_V[(i, j)] += rho * (P_V[(i, j)] - z_PV[(i, j)])
+                    lam_C[(i, j)] += rho * (p_C[(i, j)] - z_PC[(i, j)])
+                    lam_V[(i, j)] += rho * (p_V[(i, j)] - z_PV[(i, j)])
             admmlogger.debug(f"lam_C: {lam_C}")
             admmlogger.debug(f"lam_V: {lam_V}")
             for tup, val in lam_C.items():
                 # Guardar hist
-                lam_C_hist[tup].append(val)
+                lam_C_hist[tup].append(deepcopy(val))
             for tup, val in lam_V.items():
                 # Guardar hist
-                lam_V_hist[tup].append(val)
+                lam_V_hist[tup].append(deepcopy(val))
 
             # ---------- (4) RESIDUALES DE CONSENSO POR AGENTE y HISTORIA DE P ----------
             # Residuals primal y dual, de L2 y Linf de cada agente/line, y suma
@@ -3224,61 +3328,92 @@ class ADMMexchange:
 
 
             # PRIMAL RES: ||lambda_k+1 - lambda_k||
-            linf_t=0.0
-            l2_t=0.0
+            # DUAL RES: rho*||z_k+1 - z_k||
+            rPrim_inf_T=0.0
+            rPrim_l2_T=0.0
+            rDual_inf_T=0.0
+            rDual_l2_T=0.0
             for i in agents:
-                linf_i = 0.0
-                l2_i   = 0.0
-                for j in neighbors.get(i, []):
+                rPrim_linf_i=0.0
+                rPrim_l2_i=0.0
+                rDual_linf_i=0.0
+                rDual_l2_i=0.0
+                for j in neighbors.get(i):
                     d_lam_c = lam_C[(i, j)] - lam_C_prev.get((i, j)) 
                     d_lam_v = lam_V[(i, j)] - lam_V_prev.get((i, j)) 
-                    linf_i = max( linf_i , np.abs(d_lam_c).max() , np.abs(d_lam_c).max() )
-                    l2_i  += (d_lam_c**2).sum() + (d_lam_v**2).sum()
-                primal_hist[i]["linf"].append(linf_i)
-                primal_hist[i]["l2"].append(l2_i**0.5)
-                R_prim[i]={"linf":linf_i,"l2":l2_i**0.5}
-                linf_t+=linf_i
-                l2_t+=l2_i**0.5
-            primal_hist['sum']["linf"].append(linf_t)
-            primal_hist['sum']["l2"].append(l2_t)
-            R_prim['sum']={"linf":linf_t,"l2":l2_t}
-            admmlogger.debug(f"R_prim: {R_prim}")
+                    rPrim_linf_i = max( rPrim_linf_i , np.abs(d_lam_c).max() , np.abs(d_lam_v).max() )
+                    rPrim_l2_i  += (d_lam_c**2).sum() + (d_lam_v**2).sum()
+                    ####
+                    d_pc = z_PC[(i, j)] - z_PC_prev.get((i, j)) 
+                    d_pv = z_PV[(i, j)] - z_PV_prev.get((i, j)) 
+                    rDual_linf_i = max( rDual_linf_i, np.abs(d_pc).max() , np.abs(d_pv).max() )
+                    rDual_l2_i  += (d_pc**2).sum() + (d_pv**2).sum()
 
-            # DUAL RES: ||z_k+1 - z_k||
-            linf_t=0.0
-            l2_t=0.0
-            for (i,j) in undirected_edges:
-                d_pc = z_PC[(i, j)] - z_PC_prev.get((i, j)) 
-                d_pv = z_PV[(j, i)] - z_PV_prev.get((j, i)) 
-                linf_ij = max( np.abs(d_pc).max() , np.abs(d_pv).max() )
-                l2_ij  = (d_lam_c**2).sum() + (d_lam_v**2).sum()
-                dual_hist[(i,j)]["linf"].append(linf_ij)
-                dual_hist[(i,j)]["l2"].append(l2_ij**0.5)
-                R_dual[(i,j)]={"linf":linf_ij,"l2":l2_ij**0.5}
-                linf_t += linf_ij
-                l2_t += l2_ij**0.5
-            dual_hist['sum']["linf"].append(linf_t)
-            dual_hist['sum']["l2"].append(l2_t)
-            R_dual['sum']={"linf":linf_t,"l2":l2_t}
-            admmlogger.debug(f"R_prim: {R_dual}")
+                rPrim_linf_i=rPrim_linf_i
+                rPrim_l2_i=rPrim_l2_i**0.5
+                primal_hist[i]["linf"].append(rPrim_linf_i)
+                primal_hist[i]["l2"].append(rPrim_l2_i)
+                # R_prim[i]={"linf":rPrim_linf_i,"l2":rPrim_l2_i}
+                ####
+                rDual_linf_i=rho*rDual_linf_i
+                rDual_l2_i=rho*(rDual_l2_i**0.5)
+                dual_hist[i]["linf"].append(rDual_linf_i)
+                dual_hist[i]["l2"].append(rDual_l2_i)
+                # R_dual[i]={"linf":rDual_linf_i,"l2":rDual_l2_i}
+                ####
+                rPrim_inf_T+=rPrim_linf_i
+                rPrim_l2_T+=rPrim_l2_i
+                rDual_inf_T+=rDual_linf_i
+                rDual_l2_T+=rDual_l2_i
+            
+            primal_hist['sum']["linf"].append(rPrim_inf_T)
+            primal_hist['sum']["l2"].append(rPrim_l2_T)
+            # R_prim['sum']={"linf":rPrim_inf_T,"l2":rPrim_l2_T}
+            # admmlogger.debug(f"R_prim: {R_prim}")
+            ####
+            dual_hist['sum']["linf"].append(rDual_inf_T)
+            dual_hist['sum']["l2"].append(rDual_l2_T)
+            # R_dual['sum']={"linf":rDual_inf_T,"l2":rDual_l2_T}
+            # admmlogger.debug(f"R_dual: {R_dual}")
 
+            # ADAPTIVE PENALTY [Boyd 2011]
+            if adaptivePenalty:
+                self.rho_hist.append(rho)
+                if k%adaptiveModDelay==0:
+                    w=-1-adaptiveWindow if k>adaptiveWindow-1 else -1
+                    admmlogger.debug(f"w:{w}")
+                    admmlogger.debug(f"last of primal_hist: {primal_hist['sum']['l2'][w:-1]}")
+                    admmlogger.debug(f"last of dual_hist: {dual_hist['sum']['l2'][w:-1]}")
+                    if k>=StopAdaptingAt: rho=rho
+                    else:
+                        if sum(primal_hist['sum']['l2'][w:-1])>adaptiveThresh*sum(dual_hist["sum"]["l2"][w:-1]):
+                            rho=adaptiveMult*rho # increase to speed up primal cvgc
+                        elif sum(dual_hist['sum']['l2'][w:-1])>adaptiveThresh*sum(primal_hist["sum"]["l2"][w:-1]):
+                            rho=rho/adaptiveMult # decrease to speed up dual cvg
+                        else:
+                            rho=rho
             
             # Update convergence cond
             # convergenceCondition=False # Añadir condición para e.g. norma de residuo
-            convergenceCondition = (max(R_prim['sum']["l2"] , R_prim['sum']["linf"]) <= error_threshold)
+            # last_rprim=max(R_prim['sum']["l2"],R_prim['sum']["linf"])
+            # last_rdual=max(R_dual['sum']["l2"],R_dual['sum']["linf"])
+            # if k % kmod==0: admmlogger.warning(f"===== k: {k}, Sum(||Rprim||2): {last_rprim:.4e}, Sum(||Rdual||2): {last_rdual:.4e}=====")
+            if k % kmod==0: admmlogger.warning(f"===== k: {k}, {f"rho={rho:.2f}, " if adaptivePenalty else""}Sum(||Rprim||2): {primal_hist['sum']['l2'][-1]:.4e}, Sum(||Rdual||2): {dual_hist['sum']['l2'][-1]:.4e}=====")
+            convergenceCondition = (max(primal_hist['sum']['l2'][-1] , dual_hist['sum']['l2'][-1])/len(MGs) <= error_threshold)
             k+=1
 
         self.result = {
             # Estado final
-            "P_C": P_C,"P_V": P_V,
+            "p_C": p_C,"p_V": p_V,
             "z_PC": z_PC,"z_PV": z_PV,
             "lam_C": lam_C,"lam_V": lam_V,
             "state": state,
             # Historias
             'primal_hist':primal_hist,'dual_hist':dual_hist,
-            "P_C_hist": P_C_hist,"P_V_hist": P_V_hist,
+            "p_C_hist": p_C_hist,"p_V_hist": p_V_hist,
             "lam_C_hist":lam_C_hist,"lam_V_hist":lam_V_hist,
             "x_state_hist": x_state_hist,      # dict i -> lista de estados (warm-start friendly)
         }
+        if adaptivePenalty: self.result["rho_hist"]=self.rho_hist
     def get_result(self):
         return self.result
