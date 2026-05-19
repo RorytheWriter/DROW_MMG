@@ -13,3 +13,6 @@ Diseñado para el planeamiento energético de microrredes. Permite programar el 
 Librería desarrollada en el marco del trabajo de grado de Maestría
 **Optimización distribucionalmente robusta para la gestión energética de microrredes en red**
 presentado en febrero de 2026 en la Universidad Nacional de Colombia.
+
+<img width="auto" height="75" alt="image" src="https://github.com/user-attachments/assets/3b10db13-dc0e-45d6-af3a-a9fdf069e187" />
+
